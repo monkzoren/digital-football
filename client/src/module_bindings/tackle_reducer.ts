@@ -10,8 +10,4 @@ import {
   type Infer as __Infer,
 } from "spacetimedb";
 
-export default {
-  dirX: __t.i8(),
-  dirY: __t.i8(),
-  sprint: __t.bool(),
-};
+export default {};

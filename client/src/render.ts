@@ -1,42 +1,52 @@
 import * as THREE from 'three';
-import { COURT_HALF_LEN, COURT_HALF_WID, SERVICE_LINE, LINE_MARGIN, NET_HEIGHT, REACH } from './config';
+import {
+  PITCH_HALF_LEN,
+  PITCH_HALF_WID,
+  GOAL_HALF_W,
+  GOAL_HEIGHT,
+  BOX_DEPTH,
+  BOX_HALF_W,
+  CENTER_CIRCLE_R,
+  CONTROL_RADIUS,
+} from './config';
 import { CHARACTERS, type Character, type HairStyle } from './characters';
 import {
-  playHit,
+  playKick,
   playBounce,
   playWhoosh,
-  playToss,
-  playScrew,
-  playDiveLand,
+  playSlide,
+  playGoal,
   crowdOoh,
 } from './audio';
 import { getGraphics, onGraphicsChange, type GraphicsSettings } from './graphics';
 
 // ---------------------------------------------------------------------------
-// Real-3D Virtua Tennis-style renderer (Three.js / WebGL).
+// Real-3D Virtua Striker-style renderer (Three.js / WebGL).
 //
-// Game world coords: x across the court, y along it (net at y=0), z up.
-// Three.js coords:   (wx, wz, -wy) — the camera sits at positive Z behind
-// the near baseline. scene.flip mirrors x/y so the local player is near.
+// Game world coords: x across the pitch, y along it (halfway line at y=0),
+// z up. Three.js coords: (wx, wz, -wy) — the camera sits at positive Z behind
+// the near goal. scene.flip mirrors x/y so the local player attacks away.
 //
-// Animation is event-driven: the server flips ball.lastHitSide at the exact
-// contact tick, and phase changes mark serves — we key full swing cycles
-// (backswing → contact → follow-through) off those events so the character
-// visibly strikes the ball.
+// Animation is event-driven: the server flips ball.lastTouchSide at the exact
+// contact tick, so we key full kick cycles (plant → strike → follow-through)
+// off that change and the ball visibly leaves a boot.
 // ---------------------------------------------------------------------------
 
 export interface RenderPlayer {
   x: number;
   y: number;
-  serverX: number; // raw (un-smoothed) server position — dive target
+  serverX: number; // raw (un-smoothed) server position — slide target
   serverY: number;
   side: number;
-  rigSlot?: number; // stable rig index: side + teamSlot*2 (doubles adds 2/3)
-  swingTicks: number;
-  swingKind: number;
-  lungeTicks: number;
+  rigSlot?: number; // stable rig index: side + teamSlot*2
+  kickTicks: number; // kick charge counter (0 = not charging)
+  kickKind: number; // 0 normal · 1 chip
+  kickHeld: boolean;
+  slideTicks: number; // >0 = slide tackle lunge/recovery
+  role: number; // 0 outfield · 1 keeper
   dirX: number;
   dirY: number;
+  sprinting?: boolean;
   characterId?: number;
 }
 
@@ -47,55 +57,30 @@ export interface RenderBall {
   vx: number;
   vy: number;
   vz: number;
-  lastHitSide: number;
-  rallyHits: number;
-  spinX: number; // nonzero = screw shot in flight
-  freezeTicks?: number; // hitstop: >0 = ball pinned at the contact point
-}
-
-export interface SceneTarget {
-  id: string;
-  x: number;
-  y: number;
-  side: number;
-  alive: boolean;
-  radius: number;
-}
-
-// VAR review of the point replay: Hawk-Eye style ball track, bounce mark and
-// line call. main.ts precomputes the final shot's flight once per replay and
-// reveals it progressively behind the played-back ball.
-export interface VarReview {
-  trail: { x: number; y: number; z: number }[]; // world coords, final shot only
-  progress: number; // 0..1 of the trail revealed
-  mark: { x: number; y: number; dx: number; dy: number } | null; // bounce spot + travel dir
-  call: 'IN' | 'OUT' | 'NET' | null; // colors the mark (null = neutral, no ruling)
-  overhead: boolean; // Hawk-Eye verdict camera, straight down over the mark
+  lastTouchSide: number;
+  hasOwner: boolean; // true = at somebody's feet, being dribbled
 }
 
 export interface Scene {
   flip: number;
-  court: number;
-  phase: number;
-  servingSide: number;
-  serverRigSlot?: number; // doubles: which rig holds the toss (defaults to servingSide)
+  pitch: number; // 0 grass day · 1 grass night · 2 street
+  phase: number; // 1 kickoff · 2 live · 3 pause · 4 over
+  kickoffSide: number;
   players: RenderPlayer[];
   ball: RenderBall | null;
   replayCam?: boolean; // replay playback uses the broadcast side camera
-  varReview?: VarReview; // Hawk-Eye trail/mark/verdict-cam during the replay
-  ruleset?: number; // 0 tennis · 1 beer pong · 2 target practice
-  targets?: SceneTarget[]; // beer pong cups / practice bullseyes
 }
 
-const PHASE_SERVE = 1;
-const PHASE_RALLY = 2;
+const PHASE_KICKOFF = 1;
+const PHASE_LIVE = 2;
+const PHASE_PAUSE = 3;
 
 // Stereo position for a sound at world/three x (camera looks down -z, so
 // screen left/right tracks x directly).
 const panOf = (x: number) => Math.max(-1, Math.min(1, x / 45));
-// Bounce timbre per SURFACES index: grass (soft), hard court (bright
-// pock), clay (dull thud).
-const BOUNCE_BRIGHT = [0.85, 1.15, 0.7];
+// Bounce timbre per PITCHES index: grass (soft), night grass (soft), street
+// concrete (hard slap).
+const BOUNCE_BRIGHT = [0.85, 0.85, 1.2];
 
 const GROUND_X = 58; // generous side run-off, VT2 style
 const GROUND_Y = 64; // hoarding / stand line
@@ -108,12 +93,12 @@ const COLORS = {
   sky: 0xbcd8ee,
   standDark: 0x232c4e,
   hoardingText: '#1a2a8c',
-  netPost: 0x2e4a2e,
+  netPost: 0xf2f4f8, // goal frame: white posts and crossbar
   shorts: 0xf5f5f5,
   skin: 0xe8ae7e,
   hair: 0x3a2414,
   shoe: 0xffffff,
-  ball: 0xd8f838,
+  ball: 0xffffff,
 };
 
 let renderer: THREE.WebGLRenderer;
@@ -130,14 +115,6 @@ let shockMesh: THREE.Mesh;
 let shockStart = -1;
 const shockPos = new THREE.Vector3();
 let auraRing: THREE.Mesh;
-// VAR review props: the Hawk-Eye flight tube (rebuilt once per replay) and the
-// elliptical bounce mark it lands on
-let varTrailMesh: THREE.Mesh | null = null;
-let varTrailFor: unknown = null; // trail array identity — one build per replay
-let varTrailSegs = 0;
-const VAR_TRAIL_RADIAL = 7;
-let varMarkGroup: THREE.Group;
-let varMarkDisc: THREE.Mesh;
 let sun: THREE.DirectionalLight;
 let detailGroup: THREE.Group; // crowd stands + umpire chair — droppable scenery
 // two-frame crowd animation: stands alternate between the A/B textures on a
@@ -278,8 +255,8 @@ function impactFX(at: THREE.Vector3, power: number) {
     spawnBurst(at, 0xff8c1a, 14, 18, 0.5, -50);
   }
   if (power > 0.65) addShake((power - 0.65) * 2.6);
-  playHit(power, panOf(at.x));
-  window.dispatchEvent(new CustomEvent('dt-hit', { detail: { power } }));
+  playKick(panOf(at.x), power);
+  window.dispatchEvent(new CustomEvent('df-kick', { detail: { power } }));
 }
 
 // Film grade: slightly washed, warm, a hair soft. Paired with ACES tone
@@ -313,7 +290,7 @@ function updateParticles(dt: number) {
 // ---------------------------------------------------------------------------
 // Player rig: articulated joints we pose procedurally every frame.
 // ---------------------------------------------------------------------------
-type SwingKind = 'fore' | 'back' | 'over';
+type KickKind = 'drive' | 'chip';
 
 interface Pose {
   twist: number; // upper body Y twist
@@ -369,28 +346,28 @@ interface PlayerRig {
   prevPX: number; // last frame's render position — measures that distance
   prevPZ: number;
   // animation state
-  swingStart: number; // -1 = not swinging
-  swingKind: SwingKind;
-  swingLow: boolean;
-  swingStretch: boolean; // reach-to-hit: full-body lean, no dive
-  swingPower: number; // 0..1 from the outgoing ball speed
-  swingMs: number; // stroke duration (power hits whip faster)
-  windupStart: number; // when the button went down (coil deepens while held)
-  contactPoint: THREE.Vector3 | null; // frozen ball position at the hit event
-  prevSwingTicks: number;
-  // dive/roll state
-  diveStart: number; // -1 = not diving
-  diveDir: number; // roll/spin direction sign
-  diveKind: number; // 0 short hop, 1 full dive, 2 huge layout
-  diveMs: number;
-  diveYaw: number; // world heading of the leap (head-first direction)
-  diveFromX: number; // where the leap started (render space)
-  diveFromZ: number;
-  diveLanded: boolean;
-  prevLunge: number;
+  kickStart: number; // -1 = not kicking
+  kickAnim: KickKind;
+  kickLow: boolean; // chip: toe under the ball
+  kickStretch: boolean; // stretching to reach it — full-body lean
+  kickPower: number; // 0..1 from the outgoing ball speed
+  kickMs: number; // strike duration (hard kicks whip faster)
+  windupStart: number; // when the button went down (the backlift deepens)
+  contactPoint: THREE.Vector3 | null; // frozen ball position at the strike
+  prevKickTicks: number;
+  // slide-tackle state
+  slideStart: number; // -1 = not sliding
+  slideDir: number; // which hip the player goes down on
+  slideKindAnim: number; // 0 short, 1 full, 2 last-ditch
+  slideMs: number;
+  slideYaw: number; // world heading of the lunge
+  slideFromX: number; // where the slide started (render space)
+  slideFromZ: number;
+  slideLanded: boolean;
+  prevSlide: number;
 }
 
-const DIVE_MS = 800; // matches the server's lunge recovery window
+const SLIDE_MS = 1000; // matches the server's SLIDE_TOTAL window
 
 // Piecewise channel evaluator with smoothstep easing between keys.
 function ch(t: number, keys: [number, number][]): number {
@@ -407,33 +384,32 @@ function ch(t: number, keys: [number, number][]): number {
   return keys[keys.length - 1][1];
 }
 
-// Authored dive keyframes. The body launches into a horizontal "superman"
-// reach, lands, barrel-rolls around its own long axis (which can never clip
-// the floor), and scrambles up.
-function diveFlightPose(): Pose {
+// Authored slide-tackle keyframes. The body goes down on its hip with the
+// lead leg extended at the ball, trailing leg tucked under.
+function slideFlightPose(): Pose {
   return {
     ...ZERO_POSE,
-    leanF: -0.15,
-    thighL: 0.12, calfL: 0.15, thighR: -0.08, calfR: 0.1, // legs extended behind
-    shRx: -2.7, shRz: -0.15, elR: -0.05, // racket arm reaching past the head
-    shLx: 0.5, shLz: 0.25, elL: -0.2, // trail arm along the body
+    leanF: -0.35, // torso laid back over the trailing hip
+    thighL: -1.5, calfL: 0.15, // lead leg speared out at the ball
+    thighR: -0.5, calfR: 1.5, // trailing leg tucked beneath
+    shRx: 0.9, shRz: -0.5, elR: -0.4, // trailing arm braced on the turf
+    shLx: -1.3, shLz: 0.5, elL: -0.5, // lead arm up for balance
     crouch: 0,
   };
 }
 
-// Loose half-tuck with flailing limbs: each limb oscillates at its own
-// frequency with decaying amplitude, so the tumble reads as ragdoll momentum
-// rather than a held pose.
-function diveRollPose(now: number, seed: number, decay: number): Pose {
+// Scrambling back to your feet: the limbs gather under the body, amplitude
+// decaying as the player recovers.
+function slideRollPose(now: number, seed: number, decay: number): Pose {
   const f = (hz: number, ph: number) => Math.sin(now / hz + seed + ph) * decay;
   return {
     ...ZERO_POSE,
-    thighL: -1.2 + f(47, 0) * 0.55, calfL: 1.6 + f(61, 2) * 0.5,
-    thighR: -1.2 + f(53, 4) * 0.55, calfR: 1.6 + f(43, 1) * 0.5,
-    shLx: -1.0 + f(39, 3) * 0.7, shLz: 0.3 + f(71, 5) * 0.3, elL: -1.5 + f(57, 1) * 0.5,
-    shRx: -1.4 + f(49, 2) * 0.7, shRz: -0.3 + f(67, 0) * 0.3, elR: -1.6 + f(45, 4) * 0.5,
-    twist: f(83, 2) * 0.3,
-    crouch: 0,
+    thighL: -1.1 + f(47, 0) * 0.45, calfL: 1.3 + f(61, 2) * 0.4,
+    thighR: -1.0 + f(53, 4) * 0.45, calfR: 1.4 + f(43, 1) * 0.4,
+    shLx: -0.9 + f(39, 3) * 0.6, shLz: 0.35 + f(71, 5) * 0.25, elL: -1.3 + f(57, 1) * 0.4,
+    shRx: 0.4 + f(49, 2) * 0.6, shRz: -0.35 + f(67, 0) * 0.25, elR: -1.0 + f(45, 4) * 0.4,
+    twist: f(83, 2) * 0.25,
+    crouch: 0.35 * (1 - decay),
   };
 }
 
@@ -800,37 +776,58 @@ function makeShirtTexture(id: number): THREE.CanvasTexture {
   return tex;
 }
 
-// Felt tennis ball with the classic curved seam, drawn near-white so the
-// material color keeps providing the yellow (and screw-shot purple) tint.
+// Classic black-and-white football: white leather with a ring of pentagon
+// patches. Drawn on an equirectangular map, so the poles stay clean and the
+// patches band around the equator the way a real Telstar does.
 function makeBallTexture(): THREE.CanvasTexture {
   const c = document.createElement('canvas');
   c.width = 256;
   c.height = 128;
   const g = c.getContext('2d')!;
-  g.fillStyle = '#f4f4ec';
+  g.fillStyle = '#f6f6f2';
   g.fillRect(0, 0, c.width, c.height);
-  for (let n = 0; n < 1200; n++) {
-    const s = Math.sin(n * 127.1) * 43758.5453;
-    const r = s - Math.floor(s);
+  // faint leather grain
+  for (let n = 0; n < 900; n++) {
+    const s1 = Math.sin(n * 127.1) * 43758.5453;
+    const r = s1 - Math.floor(s1);
     const s2 = Math.sin(n * 311.7) * 12543.21;
     const r2 = s2 - Math.floor(s2);
-    g.fillStyle = r > 0.5 ? 'rgba(255,255,255,0.06)' : 'rgba(90,90,60,0.05)';
+    g.fillStyle = r > 0.5 ? 'rgba(255,255,255,0.07)' : 'rgba(120,120,110,0.05)';
     g.fillRect(r * c.width, r2 * c.height, 2, 2);
   }
-  const seam = (color: string, w: number) => {
-    g.strokeStyle = color;
-    g.lineWidth = w;
-    g.lineJoin = 'round';
+  // pentagon patch, drawn as a rounded 5-gon at (cx, cy)
+  const patch = (cx: number, cy: number, r: number, rot: number) => {
+    g.fillStyle = '#1b1b20';
     g.beginPath();
-    for (let x = 0; x <= c.width; x += 4) {
-      const y = 64 + Math.sin((x / c.width) * Math.PI * 4) * 30;
-      if (x === 0) g.moveTo(x, y);
+    for (let i = 0; i < 5; i++) {
+      const a = rot + (i / 5) * Math.PI * 2;
+      const x = cx + Math.cos(a) * r;
+      const y = cy + Math.sin(a) * r * 0.92;
+      if (i === 0) g.moveTo(x, y);
       else g.lineTo(x, y);
     }
-    g.stroke();
+    g.closePath();
+    g.fill();
   };
-  seam('rgba(110,110,95,0.45)', 9); // fuzzy seam shadow
-  seam('#ffffff', 3.5);
+  // one patch at each pole band, five around the equator, staggered
+  for (let i = 0; i < 5; i++) {
+    patch((i + 0.5) * (c.width / 5), 30, 15, Math.PI / 2);
+    patch(i * (c.width / 5), 98, 15, -Math.PI / 2);
+  }
+  patch(c.width * 0.5, 64, 13, 0);
+  patch(0, 64, 13, 0);
+  patch(c.width, 64, 13, 0);
+  // seams between the patches
+  g.strokeStyle = 'rgba(60,60,66,0.5)';
+  g.lineWidth = 2;
+  for (let i = 0; i < 5; i++) {
+    const x = i * (c.width / 5);
+    g.beginPath();
+    g.moveTo(x, 12);
+    g.lineTo(x + c.width / 10, 64);
+    g.lineTo(x, 116);
+    g.stroke();
+  }
   const tex = new THREE.CanvasTexture(c);
   tex.wrapS = THREE.RepeatWrapping;
   tex.colorSpace = THREE.SRGBColorSpace;
@@ -1043,7 +1040,7 @@ function applyPhysique(rig: PlayerRig, char: Character) {
   // octopus arms, yeti bulk — see Character.physique)
   const o = char.physique;
   const legK = (1 + (s.speed - 3) * 0.05) * (o?.legs ?? 1); // 0.90 (VOLT) … 1.10 (KAI)
-  const armK = (1 + (s.reach - 3) * 0.06) * (o?.arms ?? 1); // 0.88 (KAI/ROSA) … 1.12 (VOLT)
+  const armK = (1 + (s.tackle - 3) * 0.06) * (o?.arms ?? 1);
   const bulkK = (1 + (s.power - 3) * 0.05) * (o?.bulk ?? 1); // 0.90 (KAI) … 1.10 (BLAZE)
 
   // legs: scale the whole chain and raise the hips so the feet stay on
@@ -1555,24 +1552,24 @@ function makePlayerRig(side: number, intoScene: THREE.Scene = scene3): PlayerRig
     runPhase: side * 2.7,
     prevPX: 0,
     prevPZ: 0,
-    swingStart: -1,
-    swingKind: 'fore',
-    swingLow: false,
-    swingStretch: false,
-    swingPower: 0.5,
-    swingMs: 520,
+    kickStart: -1,
+    kickAnim: 'drive',
+    kickLow: false,
+    kickStretch: false,
+    kickPower: 0.5,
+    kickMs: 520,
     windupStart: 0,
     contactPoint: null,
-    prevSwingTicks: 0,
-    diveStart: -1,
-    diveDir: 1,
-    diveKind: 1,
-    diveMs: 800,
-    diveYaw: 0,
-    diveFromX: 0,
-    diveFromZ: 0,
-    diveLanded: false,
-    prevLunge: 0,
+    prevKickTicks: 0,
+    slideStart: -1,
+    slideDir: 1,
+    slideKindAnim: 1,
+    slideMs: 800,
+    slideYaw: 0,
+    slideFromX: 0,
+    slideFromZ: 0,
+    slideLanded: false,
+    prevSlide: 0,
   };
 }
 
@@ -1645,148 +1642,104 @@ function runPose(phase: number, lean: number): Pose {
   };
 }
 
-// Wound-up backswing, held while the swing button is "live".
-function windupPose(kind: SwingKind, low: boolean): Pose {
-  if (kind === 'over') {
-    return {
-      ...ZERO_POSE,
-      leanF: -0.12, twist: -0.35,
-      crouch: 0.1,
-      thighL: -0.2, calfL: 0.3, thighR: 0.15, calfR: 0.2,
-      shLx: -2.4, shLz: 0.25, elL: -0.25, // left arm reaches up at the ball
-      shRx: 2.2, shRz: -0.85, elR: 1.6, // racket cocked back behind the head
-    };
-  }
-  const m = kind === 'fore' ? 1 : -1;
+// Cocked leg, held while the kick button is charging. The longer it is held
+// the deeper the backlift — kickPose reads the same shape at t=0.
+function kickWindup(kind: KickKind, charge: number): Pose {
+  const c = THREE.MathUtils.clamp(charge, 0, 1);
   return {
     ...ZERO_POSE,
-    twist: -0.8 * m,
-    leanF: 0.28,
-    crouch: low ? 0.42 : 0.24,
-    thighL: -0.35, calfL: 0.55, thighR: -0.35, calfR: 0.55,
-    shLx: -0.55, shLz: 0.75, elL: -0.9,
-    // racket arm taken back (across the body for backhand)
-    shRx: low ? 0.65 : 0.45,
-    shRz: kind === 'fore' ? -1.25 : 1.05,
-    elR: kind === 'fore' ? 0.5 : 0.9,
+    leanF: 0.2 + c * 0.12,
+    twist: -0.3 * c,
+    crouch: 0.14,
+    // plant leg under the body, kicking leg drawn back and cocked at the knee
+    thighL: -0.25, calfL: 0.4,
+    thighR: 0.55 + c * 0.7, calfR: 1.0 + c * 0.5,
+    // arms open out for balance, harder on a big backlift
+    shLx: -0.55 - c * 0.35, shLz: 0.6 + c * 0.25, elL: -0.75,
+    shRx: 0.35 + c * 0.3, shRz: -0.45, elR: -0.5,
+    // a chip drops the shoulders back to get the toe under the ball
+    ...(kind === 'chip' ? { leanF: 0.02 - c * 0.16, crouch: 0.2 } : null),
   };
 }
 
-// Full swing cycle. t: 0 backswing → 0.3 CONTACT → 1 follow-through done.
-// `power` (0..1) scales the whole stroke: weak = compact block, strong =
-// big torso rotation, leg drive, and a huge follow-through.
-function swingPose(kind: SwingKind, t: number, low: boolean, power = 0.5): Pose {
+// Full kick cycle. t: 0 backlift → 0.3 CONTACT → 1 follow-through done.
+// `power` (0..1) scales the whole strike: a tap is a compact side-foot pass,
+// a full charge is a hip-driven laces shot with the standing foot leaving
+// the ground.
+function kickPose(kind: KickKind, t: number, chip: boolean, power = 0.5): Pose {
   const cnt = 0.3; // contact time
-  const amp = 0.7 + 0.6 * power; // stroke amplitude
-  if (kind === 'over') {
-    // overhead smash / serve strike: whip from behind the head to out front
-    const w = windupPose('over', false);
-    if (t < cnt) {
-      const k = t / cnt;
-      return {
-        ...w,
-        shRx: THREE.MathUtils.lerp(2.2, -1.0, k * k),
-        shRz: THREE.MathUtils.lerp(-0.85, -0.15, k),
-        elR: THREE.MathUtils.lerp(1.6, -0.1, k * k),
-        shLx: THREE.MathUtils.lerp(-2.4, -0.3, k),
-        leanF: THREE.MathUtils.lerp(-0.12, 0.4, k),
-        twist: THREE.MathUtils.lerp(-0.35, 0.15, k),
-      };
-    }
-    const k = (t - cnt) / (1 - cnt);
-    return {
-      ...ZERO_POSE,
-      leanF: THREE.MathUtils.lerp(0.4, 0.22, k),
-      crouch: 0.15,
-      shRx: THREE.MathUtils.lerp(-1.0, -0.3, k),
-      shRz: -0.2,
-      elR: THREE.MathUtils.lerp(-0.1, -0.6, k),
-      shLx: -0.4, elL: -0.8,
-    };
-  }
-
-  const m = kind === 'fore' ? 1 : -1;
-  const w = windupPose(kind, low);
+  const amp = 0.7 + 0.7 * power;
+  const w = kickWindup(kind, power);
   if (t < cnt) {
-    // explosive sweep to contact: arm extends forward, torso untwists;
-    // power hits drive from the legs (deeper dip) and rotate further
+    // whip the leg through: thigh drives forward, knee extends into the ball
     const k = (t / cnt) ** 2;
     return {
       ...w,
-      twist: THREE.MathUtils.lerp(-0.8 * m * amp, 0.45 * m * amp, k),
-      shRx: THREE.MathUtils.lerp(w.shRx, low ? -0.2 : -0.45, k),
-      shRz: THREE.MathUtils.lerp(w.shRz, kind === 'fore' ? -0.3 : 0.2, k),
-      elR: THREE.MathUtils.lerp(w.elR, -0.05, k), // arm extended at contact
-      crouch: THREE.MathUtils.lerp(w.crouch, (low ? 0.3 : 0.15) + power * 0.12, k),
+      twist: THREE.MathUtils.lerp(w.twist, 0.3 * amp, k),
+      leanF: THREE.MathUtils.lerp(w.leanF, chip ? -0.05 : 0.3, k),
+      thighR: THREE.MathUtils.lerp(w.thighR, chip ? -0.75 : -0.55, k),
+      calfR: THREE.MathUtils.lerp(w.calfR, chip ? 0.35 : 0.05, k), // knee snaps straight
+      thighL: THREE.MathUtils.lerp(w.thighL, -0.15, k),
+      calfL: THREE.MathUtils.lerp(w.calfL, 0.25, k),
+      crouch: THREE.MathUtils.lerp(w.crouch, 0.1 + power * 0.1, k),
+      shLx: THREE.MathUtils.lerp(w.shLx, -1.1, k),
+      shRx: THREE.MathUtils.lerp(w.shRx, 0.7, k),
     };
   }
-  // follow-through: weak hits check the racket short; power hits wrap it all
-  // the way around with the body rotating through, back foot popping up
+  // follow-through: the leg keeps climbing and the body rotates over it;
+  // a big strike hops off the standing foot
   const k = (t - cnt) / (1 - cnt);
   const ease = 1 - (1 - k) * (1 - k);
-  const hop =
-    power > 0.7 ? -(power - 0.7) * 0.9 * Math.sin(Math.min(1, k * 1.8) * Math.PI) : 0;
+  const hop = power > 0.6 ? -(power - 0.6) * 0.7 * Math.sin(Math.min(1, k * 1.8) * Math.PI) : 0;
   return {
     ...ZERO_POSE,
-    twist: THREE.MathUtils.lerp(0.45 * m * amp, 0.75 * m * amp, ease),
-    leanF: 0.22,
-    crouch: 0.18 + hop,
-    shRx: THREE.MathUtils.lerp(-0.45, -0.7 - 0.5 * amp, ease),
-    shRz: THREE.MathUtils.lerp(
-      kind === 'fore' ? -0.3 : 0.2,
-      (kind === 'fore' ? 0.55 : -0.5) * amp,
-      ease
-    ),
-    elR: THREE.MathUtils.lerp(-0.05, -0.8, ease),
-    thighL: kind === 'fore' ? 0.1 : -0.2, thighR: kind === 'fore' ? -0.2 : 0.1,
-    shLx: -0.5, shLz: 0.4, elL: -0.9,
+    twist: THREE.MathUtils.lerp(0.3 * amp, 0.55 * amp, ease),
+    leanF: chip ? -0.1 : 0.26,
+    crouch: 0.12 + hop,
+    thighR: THREE.MathUtils.lerp(chip ? -0.75 : -0.55, -1.15 * amp, ease),
+    calfR: THREE.MathUtils.lerp(chip ? 0.35 : 0.05, 0.2, ease),
+    thighL: THREE.MathUtils.lerp(-0.15, 0.3, ease),
+    calfL: THREE.MathUtils.lerp(0.25, 0.75, ease),
+    shLx: -1.2, shLz: 0.5, elL: -0.7,
+    shRx: 0.8, shRz: -0.5, elR: -0.5,
   };
 }
 
-// Serve toss: left arm releases the ball upward, racket cocked, watching it.
-function tossPose(ballZ: number): Pose {
-  const up = THREE.MathUtils.clamp((ballZ - 6) / 6, 0, 1);
-  return {
-    ...ZERO_POSE,
-    leanF: -0.1 - up * 0.08,
-    twist: -0.3,
-    shLx: -1.4 - up * 1.3, shLz: 0.2, elL: -0.15, // toss arm follows the ball up
-    shRx: 1.7 + up * 0.5, shRz: -0.8, elR: 1.5, // racket winding up behind
-    thighL: -0.15, calfL: 0.25, thighR: 0.1, calfR: 0.15,
-  };
-}
+const KICK_MS = 420;
+// Full charge, in ms — mirrors KICK_CHARGE_TICKS / TICK_HZ in the module.
+const KICK_CHARGE_MS = 800;
 
-const SWING_MS = 520;
-
-function triggerSwing(
+function triggerKick(
   rig: PlayerRig,
-  kind: SwingKind,
-  low: boolean,
+  kind: KickKind,
+  chip: boolean,
   now: number,
   stretch = false,
   power = 0.5,
   atContact = false
 ) {
-  rig.swingKind = kind;
-  rig.swingLow = low;
-  rig.swingStretch = stretch;
-  rig.swingPower = power;
-  // power hits whip through faster; weak hits are a slower, checked block
-  rig.swingMs = 620 - 200 * power;
-  // A real hit fires at the server's contact instant — start the stroke just
-  // before its contact phase (the windup was the backswing), so the racket
-  // meets the ball NOW instead of sweeping through empty air afterwards.
-  rig.swingStart = atContact ? now - rig.swingMs * 0.26 : now;
+  rig.kickAnim = kind;
+  rig.kickLow = chip;
+  rig.kickStretch = stretch;
+  rig.kickPower = power;
+  // a hard strike whips through faster than a side-foot pass
+  rig.kickMs = KICK_MS + 160 * (1 - power);
+  // A real kick fires at the server's contact instant — start the cycle just
+  // before its contact phase (the backlift already happened while charging),
+  // so the boot meets the ball NOW instead of after it has gone.
+  rig.kickStart = atContact ? now - rig.kickMs * 0.3 : now;
 }
 
 // ---------------------------------------------------------------------------
 // Environment (court, net, stands, hoardings)
 // ---------------------------------------------------------------------------
+// Pitch styles: 0 grass by day, 1 grass under floodlights, 2 street concrete.
+// Mown stripes run across the pitch on both grass surfaces; the street cage
+// is flat asphalt with painted lines.
 const SURFACES = [
   { inner: '#4aa338', outer: '#419230', stripe: true, noise: 'rgba(0,60,0,0.05)' },
-  // hard court in the classic Dreamcast mint-green
-  { inner: '#8fbf9b', outer: '#649c78', stripe: false, noise: 'rgba(0,50,25,0.05)' },
-  { inner: '#c86438', outer: '#b25830', stripe: false, noise: 'rgba(80,20,0,0.06)' },
+  { inner: '#2f7a2c', outer: '#296b26', stripe: true, noise: 'rgba(0,40,0,0.06)' },
+  { inner: '#6b6f75', outer: '#5d6167', stripe: false, noise: 'rgba(20,20,25,0.07)' },
 ];
 
 function makeGroundTexture(court: number): THREE.CanvasTexture {
@@ -1811,8 +1764,8 @@ function makeGroundTexture(court: number): THREE.CanvasTexture {
       g.fillRect(0, toV(Math.min(y + STRIPE, GROUND_EXT_Y)), c.width, toV(y) - toV(Math.min(y + STRIPE, GROUND_EXT_Y)));
     }
   } else {
-    const mx = COURT_HALF_WID + 6;
-    const my = COURT_HALF_LEN + 8;
+    const mx = PITCH_HALF_WID + 6;
+    const my = PITCH_HALF_LEN + 8;
     g.fillStyle = surf.inner;
     g.fillRect(toU(-mx), toV(my), toU(mx) - toU(-mx), toV(-my) - toV(my));
   }
@@ -1825,8 +1778,8 @@ function makeGroundTexture(court: number): THREE.CanvasTexture {
     g.fillRect(r * c.width, r2 * c.height, 2, 2);
   }
 
-  const hw = COURT_HALF_WID;
-  const hl = COURT_HALF_LEN;
+  const hw = PITCH_HALF_WID;
+  const hl = PITCH_HALF_LEN;
 
   // baked ambient falloff toward the hoardings grounds the court in the bowl
   for (const [gy0, gy1, ry] of [
@@ -1850,39 +1803,49 @@ function makeGroundTexture(court: number): THREE.CanvasTexture {
     g.fillRect(rx, 0, c.width * 0.14, c.height);
   }
 
-  // grass wears thin where the players grind behind the baselines
-  if (court === 0) {
-    for (const wy of [hl - 2.5, -(hl - 2.5)]) {
-      for (const [rx, ry, a] of [[8.5, 3.2, 0.07], [5, 2.2, 0.06]] as const) {
-        g.fillStyle = `rgba(200,186,124,${a})`;
+  // the grass dies in the goalmouths and around the penalty spots — the two
+  // patches of a five-a-side pitch that never get a rest
+  if (court !== 2) {
+    for (const gs of [1, -1]) {
+      for (const [wy, rx, ry, a] of [
+        [gs * (hl - 1.5), GOAL_HALF_W + 1.5, 3.2, 0.09],
+        [gs * (hl - BOX_DEPTH + 3), 4.5, 2.4, 0.06],
+      ] as const) {
+        g.fillStyle = `rgba(196,180,120,${a})`;
         g.beginPath();
         g.ellipse(toU(0), toV(wy), toU(rx) - toU(0), toV(0) - toV(ry), 0, 0, Math.PI * 2);
         g.fill();
       }
     }
   }
-  // clay carries drag-net sweep lines and slide scuffs
+  // street concrete: expansion joints and the scuffs of a thousand slides
   if (court === 2 && gfx.detail) {
-    g.strokeStyle = 'rgba(255,255,255,0.045)';
-    g.lineWidth = 2;
-    for (let wy = -hl - 6; wy <= hl + 6; wy += 2.6) {
+    g.strokeStyle = 'rgba(0,0,0,0.10)';
+    g.lineWidth = 3;
+    for (let wy = -hl - 6; wy <= hl + 6; wy += 13) {
       g.beginPath();
-      g.moveTo(toU(-hw - 5), toV(wy));
-      g.lineTo(toU(hw + 5), toV(wy + 0.4));
+      g.moveTo(toU(-hw - 6), toV(wy));
+      g.lineTo(toU(hw + 6), toV(wy));
       g.stroke();
     }
-    g.strokeStyle = 'rgba(80,30,10,0.10)';
+    for (let wx = -hw - 6; wx <= hw + 6; wx += 13) {
+      g.beginPath();
+      g.moveTo(toU(wx), toV(-hl - 6));
+      g.lineTo(toU(wx), toV(hl + 6));
+      g.stroke();
+    }
+    g.strokeStyle = 'rgba(255,255,255,0.06)';
     g.lineWidth = 3;
     for (let n = 0; n < 90; n++) {
-      const s = Math.sin(n * 91.7) * 43758.5453;
-      const wx = ((s - Math.floor(s)) * 2 - 1) * hw;
+      const s1 = Math.sin(n * 91.7) * 43758.5453;
+      const wx = ((s1 - Math.floor(s1)) * 2 - 1) * hw;
       const s2 = Math.sin(n * 271.3) * 12543.21;
       const wy = ((s2 - Math.floor(s2)) * 2 - 1) * (hl + 3);
       const s3 = Math.sin(n * 137.9) * 33421.13;
       const ang = (s3 - Math.floor(s3)) * Math.PI * 2;
       g.beginPath();
       g.moveTo(toU(wx), toV(wy));
-      g.lineTo(toU(wx + Math.cos(ang) * 2.2), toV(wy + Math.sin(ang) * 1.2));
+      g.lineTo(toU(wx + Math.cos(ang) * 2.6), toV(wy + Math.sin(ang) * 1.4));
       g.stroke();
     }
   }
@@ -1894,23 +1857,67 @@ function makeGroundTexture(court: number): THREE.CanvasTexture {
     g.lineTo(toU(x2) + ox, toV(y2) + oy);
     g.stroke();
   };
+  const arc = (
+    cx: number, cy: number, r: number, a0: number, a1: number, ox: number, oy: number
+  ) => {
+    g.beginPath();
+    // canvas y grows downward while world y grows upward, so sweeping
+    // counter-clockwise on screen draws a clockwise world arc
+    g.ellipse(
+      toU(cx) + ox, toV(cy) + oy,
+      toU(r) - toU(0), toV(0) - toV(r),
+      0, -a1, -a0
+    );
+    g.stroke();
+  };
+  const dot = (cx: number, cy: number, ox: number, oy: number) => {
+    g.beginPath();
+    g.ellipse(toU(cx) + ox, toV(cy) + oy, toU(0.45) - toU(0), toV(0) - toV(0.45), 0, 0, Math.PI * 2);
+    g.fill();
+  };
+  const SIX_DEPTH = BOX_DEPTH * 0.42; // six-yard box
+  const SIX_HALF_W = GOAL_HALF_W + 2.5;
+  const PEN_SPOT = BOX_DEPTH * 0.62;
   const paintLines = (ox: number, oy: number) => {
+    // touchlines + goal lines
     line(-hw, -hl, hw, -hl, ox, oy);
     line(-hw, hl, hw, hl, ox, oy);
     line(-hw, -hl, -hw, hl, ox, oy);
     line(hw, -hl, hw, hl, ox, oy);
-    line(-hw, -SERVICE_LINE, hw, -SERVICE_LINE, ox, oy);
-    line(-hw, SERVICE_LINE, hw, SERVICE_LINE, ox, oy);
-    line(0, -SERVICE_LINE, 0, SERVICE_LINE, ox, oy);
-    line(0, -hl, 0, -hl + 1.4, ox, oy);
-    line(0, hl, 0, hl - 1.4, ox, oy);
+    // halfway line + center circle + spot
+    line(-hw, 0, hw, 0, ox, oy);
+    arc(0, 0, CENTER_CIRCLE_R, 0, Math.PI * 2, ox, oy);
+    dot(0, 0, ox, oy);
+    for (const gs of [1, -1]) {
+      const gl = gs * hl; // this end's goal line
+      // penalty area
+      line(-BOX_HALF_W, gl, -BOX_HALF_W, gl - gs * BOX_DEPTH, ox, oy);
+      line(BOX_HALF_W, gl, BOX_HALF_W, gl - gs * BOX_DEPTH, ox, oy);
+      line(-BOX_HALF_W, gl - gs * BOX_DEPTH, BOX_HALF_W, gl - gs * BOX_DEPTH, ox, oy);
+      // six-yard box
+      line(-SIX_HALF_W, gl, -SIX_HALF_W, gl - gs * SIX_DEPTH, ox, oy);
+      line(SIX_HALF_W, gl, SIX_HALF_W, gl - gs * SIX_DEPTH, ox, oy);
+      line(-SIX_HALF_W, gl - gs * SIX_DEPTH, SIX_HALF_W, gl - gs * SIX_DEPTH, ox, oy);
+      // penalty spot + the D outside the box
+      dot(0, gl - gs * PEN_SPOT, ox, oy);
+      const d = Math.acos(Math.min(1, (BOX_DEPTH - PEN_SPOT) / CENTER_CIRCLE_R));
+      if (gs > 0) arc(0, gl - gs * PEN_SPOT, CENTER_CIRCLE_R, Math.PI + d, 2 * Math.PI - d, ox, oy);
+      else arc(0, gl - gs * PEN_SPOT, CENTER_CIRCLE_R, d, Math.PI - d, ox, oy);
+      // corner arcs
+      for (const sx of [1, -1]) {
+        const a0 = gs > 0 ? (sx > 0 ? Math.PI : Math.PI * 1.5) : (sx > 0 ? Math.PI * 0.5 : 0);
+        arc(sx * hw, gl, 1.6, a0, a0 + Math.PI / 2, ox, oy);
+      }
+    }
   };
-  // soft baked shadow under the tape lifts them off the surface
+  // soft baked shadow under the paint lifts the markings off the surface
   g.strokeStyle = 'rgba(0,10,0,0.22)';
-  g.lineWidth = 7;
+  g.fillStyle = 'rgba(0,10,0,0.22)';
+  g.lineWidth = 6;
   paintLines(2, 3);
   g.strokeStyle = '#fafafa';
-  g.lineWidth = 5;
+  g.fillStyle = '#fafafa';
+  g.lineWidth = 4;
   paintLines(0, 0);
 
   const tex = new THREE.CanvasTexture(c);
@@ -2052,12 +2059,12 @@ function makeHoardingTexture(): THREE.CanvasTexture {
   c.height = 64;
   const g = c.getContext('2d')!;
   const panels: [string, string, string][] = [
-    ['DIGITAL TENNIS', '#101c54', '#ffffff'],
-    ['ACE SPORTS', '#f4f6fa', '#12205a'],
+    ['DIGITAL FOOTBALL', '#101c54', '#ffffff'],
+    ['BOOT ROOM', '#f4f6fa', '#12205a'],
     ['VOLT ENERGY', '#f2c018', '#221a06'],
-    ['TOPSPIN TOUR', '#175c34', '#eafaf0'],
-    ['SMASH! FM', '#b8241c', '#ffffff'],
-    ['NET RUNNER', '#f4f6fa', '#b8241c'],
+    ['FIVE-A-SIDE FC', '#175c34', '#eafaf0'],
+    ['TERRACE FM', '#b8241c', '#ffffff'],
+    ['GOLDEN GOAL', '#f4f6fa', '#b8241c'],
   ];
   const pw = c.width / panels.length;
   g.textAlign = 'center';
@@ -2140,18 +2147,24 @@ function makeJumbotronTexture(): THREE.CanvasTexture {
   word.addColorStop(0, '#fff8d0');
   word.addColorStop(1, '#f2c018');
   g.fillStyle = word;
-  g.font = 'italic 900 44px "Arial Black", Arial, sans-serif';
-  g.fillText('DIGITAL TENNIS', c.width / 2, 82);
-  // tennis ball dotting the tagline
-  g.fillStyle = '#d8f838';
+  g.font = 'italic 900 38px "Arial Black", Arial, sans-serif';
+  g.fillText('DIGITAL FOOTBALL', c.width / 2, 82);
+  // a football dotting the tagline
+  g.fillStyle = '#f6f6f2';
   g.beginPath();
   g.arc(c.width / 2 - 78, 134, 12, 0, Math.PI * 2);
   g.fill();
-  g.strokeStyle = '#ffffff';
-  g.lineWidth = 2;
+  g.fillStyle = '#1b1b20';
   g.beginPath();
-  g.arc(c.width / 2 - 84, 134, 12, -0.9, 0.9);
-  g.stroke();
+  for (let i = 0; i < 5; i++) {
+    const a = -Math.PI / 2 + (i / 5) * Math.PI * 2;
+    const x = c.width / 2 - 78 + Math.cos(a) * 4.5;
+    const y = 134 + Math.sin(a) * 4.5;
+    if (i === 0) g.moveTo(x, y);
+    else g.lineTo(x, y);
+  }
+  g.closePath();
+  g.fill();
   g.fillStyle = '#e83828';
   g.beginPath();
   g.arc(c.width / 2 - 34, 134, 7, 0, Math.PI * 2);
@@ -2250,56 +2263,76 @@ function buildEnvironment() {
   ground.receiveShadow = true;
   scene3.add(ground);
 
-  // --- net: woven mesh with a real center sag, curved band, strap, posts ---
-  const NW = COURT_HALF_WID + 3;
-  const sagAt = (x: number) => 0.24 * (1 - (x / NW) ** 2);
-  const netGeo = new THREE.PlaneGeometry(NW * 2, NET_HEIGHT, 48, 6);
-  {
-    const pos = netGeo.attributes.position as THREE.BufferAttribute;
-    for (let i = 0; i < pos.count; i++) {
-      const yW = pos.getY(i) + NET_HEIGHT / 2; // 0 at the ground
-      pos.setY(i, yW * (1 - sagAt(pos.getX(i)) / NET_HEIGHT) - NET_HEIGHT / 2);
-    }
-  }
+  // --- goals: white frame, sagging net, stanchions. One at each end; the
+  // ball crosses the line at |y| = PITCH_HALF_LEN, so the frame sits there
+  // and the netting hangs behind it. ---------------------------------------
+  // The near goal fills a lot of frame, so the netting has to be something
+  // you see the pitch THROUGH, not a wall across the bottom of the screen.
   const netMat = new THREE.MeshLambertMaterial({
     map: makeNetTexture(),
     transparent: true,
     side: THREE.DoubleSide,
+    opacity: 0.45,
+    depthWrite: false,
+    color: 0xf4f8ff,
   });
-  const net = new THREE.Mesh(netGeo, netMat);
-  net.position.set(0, NET_HEIGHT / 2, 0);
-  scene3.add(net);
+  const frameMat = new THREE.MeshLambertMaterial({ color: COLORS.netPost });
+  const POST_R = 0.22;
+  const NET_DEPTH = 5.5; // how far the net is pulled back behind the line
+  for (const gs of [1, -1]) {
+    const goal = new THREE.Group();
+    // three.js z = -world y, so a goal at world y = gs*HALF_LEN sits at -gs*…
+    goal.position.set(0, 0, -gs * PITCH_HALF_LEN);
+    scene3.add(goal);
 
-  const bandGeo = new THREE.BoxGeometry(NW * 2, 0.3, 0.14, 48, 1, 1);
-  {
-    const pos = bandGeo.attributes.position as THREE.BufferAttribute;
-    for (let i = 0; i < pos.count; i++) pos.setY(i, pos.getY(i) - sagAt(pos.getX(i)));
-    bandGeo.computeVertexNormals();
-  }
-  const band = new THREE.Mesh(bandGeo, new THREE.MeshLambertMaterial({ color: 0xffffff }));
-  band.position.set(0, NET_HEIGHT - 0.15, 0);
-  band.castShadow = true;
-  scene3.add(band);
-
-  const strap = new THREE.Mesh(
-    new THREE.PlaneGeometry(0.36, NET_HEIGHT - sagAt(0) - 0.02),
-    new THREE.MeshLambertMaterial({ color: 0xf6f6f6, side: THREE.DoubleSide })
-  );
-  strap.position.set(0, (NET_HEIGHT - sagAt(0)) / 2, 0.075);
-  scene3.add(strap);
-
-  const capMat = new THREE.MeshLambertMaterial({ color: 0xe8e8e8 });
-  for (const px of [-NW, NW]) {
-    const post = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.16, 0.18, NET_HEIGHT + 0.3, 10),
-      new THREE.MeshLambertMaterial({ color: COLORS.netPost })
+    for (const px of [-GOAL_HALF_W, GOAL_HALF_W]) {
+      const post = new THREE.Mesh(
+        new THREE.CylinderGeometry(POST_R, POST_R, GOAL_HEIGHT, 12),
+        frameMat
+      );
+      post.position.set(px, GOAL_HEIGHT / 2, 0);
+      post.castShadow = true;
+      goal.add(post);
+    }
+    const bar = new THREE.Mesh(
+      new THREE.CylinderGeometry(POST_R, POST_R, GOAL_HALF_W * 2, 12),
+      frameMat
     );
-    post.position.set(px, (NET_HEIGHT + 0.3) / 2, 0);
-    post.castShadow = true;
-    scene3.add(post);
-    const cap = new THREE.Mesh(new THREE.SphereGeometry(0.2, 10, 8), capMat);
-    cap.position.set(px, NET_HEIGHT + 0.32, 0);
-    scene3.add(cap);
+    bar.rotation.z = Math.PI / 2;
+    bar.position.set(0, GOAL_HEIGHT, 0);
+    bar.castShadow = true;
+    goal.add(bar);
+
+    // back stanchions, leaning away from the pitch
+    for (const px of [-GOAL_HALF_W, GOAL_HALF_W]) {
+      const stay = new THREE.Mesh(
+        new THREE.CylinderGeometry(POST_R * 0.6, POST_R * 0.6, Math.hypot(GOAL_HEIGHT, NET_DEPTH), 8),
+        frameMat
+      );
+      stay.position.set(px, GOAL_HEIGHT / 2, -gs * NET_DEPTH / 2);
+      stay.rotation.x = gs * Math.atan2(NET_DEPTH, GOAL_HEIGHT);
+      goal.add(stay);
+    }
+
+    // netting: back panel, roof, two sides
+    const back = new THREE.Mesh(
+      new THREE.PlaneGeometry(GOAL_HALF_W * 2, Math.hypot(GOAL_HEIGHT, NET_DEPTH)),
+      netMat
+    );
+    // tilted so its top edge meets the crossbar and its foot the net's back
+    back.position.set(0, GOAL_HEIGHT / 2, -gs * NET_DEPTH / 2);
+    back.rotation.x = gs * Math.atan2(NET_DEPTH, GOAL_HEIGHT);
+    goal.add(back);
+    const roof = new THREE.Mesh(new THREE.PlaneGeometry(GOAL_HALF_W * 2, NET_DEPTH), netMat);
+    roof.rotation.x = -Math.PI / 2;
+    roof.position.set(0, GOAL_HEIGHT, -gs * NET_DEPTH / 2);
+    goal.add(roof);
+    for (const px of [-GOAL_HALF_W, GOAL_HALF_W]) {
+      const sideNet = new THREE.Mesh(new THREE.PlaneGeometry(NET_DEPTH, GOAL_HEIGHT), netMat);
+      sideNet.rotation.y = Math.PI / 2;
+      sideNet.position.set(px, GOAL_HEIGHT / 2, -gs * NET_DEPTH / 2);
+      goal.add(sideNet);
+    }
   }
 
   // --- hoardings: sponsor boards ringing the whole octagon (always on — a
@@ -2416,7 +2449,7 @@ function buildEnvironment() {
     }
   }
 
-  // --- player benches flanking the umpire chair ---------------------------
+  // --- dugouts: the two benches down the touchline ------------------------
   const benchSeatMat = new THREE.MeshLambertMaterial({ color: 0x2e6cb0 });
   const benchLegMat = new THREE.MeshLambertMaterial({ color: 0x9aa4b0 });
   const towelMat = new THREE.MeshLambertMaterial({ color: 0xf6f6f2 });
@@ -2442,75 +2475,6 @@ function buildEnvironment() {
     detailGroup.add(bench);
   }
 
-  // umpire chair: white frame, green seat, ladder rungs, and a parasol
-  const chairMat = new THREE.MeshLambertMaterial({ color: 0xeef0ee });
-  const chairGreen = new THREE.MeshLambertMaterial({ color: 0x1d6a38 });
-  const chair = new THREE.Group();
-  const seat = new THREE.Mesh(new THREE.BoxGeometry(1.6, 1.4, 1.4), chairGreen);
-  seat.position.y = 5.2;
-  seat.castShadow = true;
-  chair.add(seat);
-  const pole = new THREE.Mesh(new THREE.BoxGeometry(1.1, 4.6, 1.1), chairMat);
-  pole.position.y = 2.3;
-  pole.castShadow = true;
-  chair.add(pole);
-  for (let s = 0; s < 4; s++) {
-    const rung = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.14, 1.1), chairMat);
-    rung.position.set(-0.85, 1.0 + s * 1.1, 0);
-    chair.add(rung);
-  }
-  const brollyPole = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 3.4, 8), chairMat);
-  brollyPole.position.set(0.8, 8.3, 0);
-  chair.add(brollyPole);
-  const canopy = new THREE.Mesh(new THREE.ConeGeometry(2.7, 1.2, 8), chairGreen);
-  canopy.position.set(0.4, 9.9, 0);
-  canopy.castShadow = true;
-  chair.add(canopy);
-
-  // the REF: seated on the chair, navy blazer + cap, facing the court (-x).
-  // Same stylized proportions as the players, built from primitives.
-  const refSkin = new THREE.MeshLambertMaterial({ color: COLORS.skin });
-  const refBlazer = new THREE.MeshLambertMaterial({ color: 0x24356e });
-  const refSlacks = new THREE.MeshLambertMaterial({ color: 0xf5f5f5 });
-  const refPart = (mesh: THREE.Mesh, x: number, y: number, z: number, rz = 0) => {
-    mesh.position.set(x, y, z);
-    mesh.rotation.z = rz;
-    mesh.castShadow = true;
-    chair.add(mesh);
-    return mesh;
-  };
-  const seatTop = 5.9;
-  // torso leaning slightly over the court
-  refPart(
-    new THREE.Mesh(new THREE.CapsuleGeometry(0.6, 1.3, 4, 10), refBlazer),
-    -0.15, seatTop + 1.15, 0, -0.12
-  );
-  // head + cap with a forward brim
-  refPart(new THREE.Mesh(new THREE.SphereGeometry(0.5, 14, 12), refSkin), -0.2, seatTop + 2.45, 0);
-  refPart(
-    new THREE.Mesh(new THREE.CylinderGeometry(0.52, 0.54, 0.26, 12), refBlazer),
-    -0.2, seatTop + 2.85, 0
-  );
-  refPart(new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.08, 0.62), refBlazer), -0.7, seatTop + 2.78, 0);
-  for (const s of [-1, 1]) {
-    // thighs run forward along the seat, shins hang toward the footrest
-    refPart(
-      new THREE.Mesh(new THREE.CapsuleGeometry(0.26, 0.75, 4, 8), refSlacks),
-      -0.65, seatTop + 0.28, s * 0.34, Math.PI / 2
-    );
-    refPart(
-      new THREE.Mesh(new THREE.CapsuleGeometry(0.22, 0.85, 4, 8), refSlacks),
-      -1.15, seatTop - 0.75, s * 0.34
-    );
-    refPart(new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.22, 0.3), refSlacks), -1.3, seatTop - 1.35, s * 0.34);
-    // arms angled down to rest on the knees
-    refPart(
-      new THREE.Mesh(new THREE.CapsuleGeometry(0.18, 0.85, 4, 8), refBlazer),
-      -0.5, seatTop + 1.15, s * 0.68, 2.45
-    );
-  }
-  chair.position.set(GROUND_X - 26, 0, 0.8);
-  detailGroup.add(chair);
 }
 
 // ---------------------------------------------------------------------------
@@ -2601,8 +2565,8 @@ function buildScene() {
   });
 
   ballMesh = new THREE.Mesh(
-    new THREE.SphereGeometry(0.55, 18, 14),
-    new THREE.MeshLambertMaterial({ map: makeBallTexture(), color: COLORS.ball, emissive: 0x556600 })
+    new THREE.SphereGeometry(0.55, 20, 16),
+    new THREE.MeshLambertMaterial({ map: makeBallTexture(), color: COLORS.ball })
   );
   ballMesh.castShadow = true;
   ballMesh.visible = false;
@@ -2651,113 +2615,9 @@ function buildScene() {
   auraRing.visible = false;
   scene3.add(auraRing);
 
-  // VAR bounce mark: colored ellipse + white rim, stretched along the travel
-  // direction like a Hawk-Eye impact print
-  varMarkGroup = new THREE.Group();
-  varMarkDisc = new THREE.Mesh(
-    new THREE.CircleGeometry(0.85, 36),
-    new THREE.MeshBasicMaterial({
-      color: 0x30d860, transparent: true, opacity: 0.8, depthWrite: false,
-    })
-  );
-  varMarkDisc.rotation.x = -Math.PI / 2;
-  varMarkDisc.position.y = 0.05;
-  const varMarkRim = new THREE.Mesh(
-    new THREE.RingGeometry(0.85, 1.12, 36),
-    new THREE.MeshBasicMaterial({
-      color: 0xffffff, transparent: true, opacity: 0.95, side: THREE.DoubleSide, depthWrite: false,
-    })
-  );
-  varMarkRim.rotation.x = -Math.PI / 2;
-  varMarkRim.position.y = 0.06;
-  varMarkGroup.add(varMarkDisc, varMarkRim);
-  varMarkGroup.visible = false;
-  scene3.add(varMarkGroup);
-
-  buildTargetPools();
   applyResolution();
   applyShadows();
   applyGrade();
-}
-
-// ---------------------------------------------------------------------------
-// Mode props: beer pong cups (red party cups) + practice bullseyes.
-// Pooled meshes, repositioned every frame from scene.targets.
-// ---------------------------------------------------------------------------
-const cupPool: THREE.Group[] = [];
-const ringPool: THREE.Group[] = [];
-const prevTargetAlive = new Map<string, boolean>();
-
-function buildTargetPools() {
-  const cupMat = new THREE.MeshLambertMaterial({ color: 0xd82818 });
-  const beerMat = new THREE.MeshBasicMaterial({ color: 0xe8b83a });
-  const rimMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
-  for (let i = 0; i < 12; i++) {
-    const group = new THREE.Group();
-    const body = new THREE.Mesh(new THREE.CylinderGeometry(1.05, 0.78, 2.6, 14), cupMat);
-    body.position.y = 1.3;
-    body.castShadow = true;
-    const rim = new THREE.Mesh(new THREE.TorusGeometry(1.05, 0.09, 6, 14), rimMat);
-    rim.rotation.x = Math.PI / 2;
-    rim.position.y = 2.6;
-    const beer = new THREE.Mesh(new THREE.CircleGeometry(0.95, 14), beerMat);
-    beer.rotation.x = -Math.PI / 2;
-    beer.position.y = 2.5;
-    group.add(body, rim, beer);
-    group.visible = false;
-    scene3.add(group);
-    cupPool.push(group);
-  }
-  for (let i = 0; i < 10; i++) {
-    const group = new THREE.Group();
-    const colors = [0xd82818, 0xffffff, 0xd82818];
-    const fractions = [1, 0.62, 0.28];
-    for (let j = 0; j < 3; j++) {
-      const disc = new THREE.Mesh(
-        new THREE.CircleGeometry(fractions[j], 24),
-        new THREE.MeshBasicMaterial({ color: colors[j], transparent: true, opacity: 0.85 })
-      );
-      disc.rotation.x = -Math.PI / 2;
-      disc.position.y = 0.04 + j * 0.02;
-      group.add(disc);
-    }
-    group.visible = false;
-    scene3.add(group);
-    ringPool.push(group);
-  }
-}
-
-function updateTargets(scene: Scene, now: number) {
-  const targets = scene.targets ?? [];
-  const cups = scene.ruleset === 1;
-  const pool = cups ? cupPool : ringPool;
-  const otherPool = cups ? ringPool : cupPool;
-  for (const g of otherPool) g.visible = false;
-  let i = 0;
-  for (const t of targets) {
-    // sink FX on the live view (replays would re-fire on old frames)
-    const wasAlive = prevTargetAlive.get(t.id);
-    if (!scene.replayCam) {
-      if (wasAlive === true && !t.alive) {
-        const at = toThree(scene.flip, t.x, t.y, 1.5);
-        spawnBurst(at, cups ? 0xe8b83a : 0xffd400, 26, 22, 0.85, -40);
-        spawnBurst(at, 0xffffff, 12, 14, 0.9, -25);
-        addShake(0.9);
-      }
-      prevTargetAlive.set(t.id, t.alive);
-    }
-    if (!t.alive || i >= pool.length) continue;
-    const g = pool[i++];
-    const pos = toThree(scene.flip, t.x, t.y, 0);
-    g.position.set(pos.x, 0, pos.z);
-    if (!cups) {
-      // bullseyes are drawn at their true hit radius
-      const s = t.radius / 1;
-      g.scale.set(s, 1, s);
-    }
-    g.visible = true;
-  }
-  for (; i < pool.length; i++) pool[i].visible = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -2845,8 +2705,6 @@ function rebuildScene() {
   particles.length = 0;
   trailMeshes.length = 0;
   trailHistory.length = 0;
-  cupPool.length = 0; // buildScene → buildTargetPools refills these
-  ringPool.length = 0;
   playerRigs = [];
   currentCourt = -1;
   buildScene();
@@ -2867,18 +2725,15 @@ function disposeScene() {
 // ---------------------------------------------------------------------------
 // Per-frame update
 // ---------------------------------------------------------------------------
-let prevLastHitSide = -1;
+let prevLastTouchSide = -1;
+let prevBallSpeed = 0;
 let prevBallActive = false;
 let prevBallVz = 0;
 let prevPhase = -1;
 let bouncesSinceHit = 0; // only the FIRST bounce of a shot can be a line call
 let lastFrame = 0;
 let lastChargeSpawn = 0; // throttles the finisher-windup particle crackle
-let lastFlameSpawn = 0; // throttles the screw-ball flame spew
 
-// screw-ball trail: white-gold at the head cooling to deep red at the tail
-const FLAME_TRAIL = [0xfff2a8, 0xffd040, 0xffa020, 0xff7018, 0xf04810, 0xc03010, 0x902020];
-const FLAME_COLORS = [0xffd040, 0xff8020, 0xff4010, 0xc060ff];
 
 // charge-up aura palettes [flame, arc]: each finisher rolls one at random so
 // no two buildups look alike — super-saiyan gold, electric storm, blood rage
@@ -2898,101 +2753,86 @@ export function drawScene(scene: Scene) {
   lastFrame = now;
 
   const { flip, ball } = scene;
-  const heat = 1 + Math.min(0.8, (ball?.rallyHits ?? 0) * 0.06);
-  setCourt(scene.court);
-  updateTargets(scene, now);
+  setCourt(scene.pitch);
   animateCrowd(now);
 
-  // --- detect hit + bounce events (animations, VFX, SFX) --------------------
+  // --- detect kick + bounce events (animations, VFX, SFX) -------------------
   const ballPos3 = ball ? toThree(flip, ball.x, ball.y, ball.z) : null;
   if (ball && ballPos3) {
-    const speed = Math.hypot(ball.vx, ball.vy);
-    const power = THREE.MathUtils.clamp((speed - 40) / 60, 0.15, 1);
-    if (scene.phase === PHASE_RALLY) {
-      const rallyHit = prevLastHitSide !== -1 && ball.lastHitSide !== prevLastHitSide;
-      const serveHit = prevPhase === PHASE_SERVE;
-      if (rallyHit || serveHit) {
-        const strikerSide = serveHit ? scene.servingSide : ball.lastHitSide;
-        // doubles: the striker is whichever teammate is closest to the ball
-        // (a serve is always the designated server's rig)
-        const striker = serveHit
-          ? scene.players.find(
-              p => (p.rigSlot ?? p.side) === (scene.serverRigSlot ?? scene.servingSide)
-            ) ?? scene.players.find(p => p.side === strikerSide)
-          : scene.players
-              .filter(p => p.side === strikerSide)
-              .sort(
-                (a, b) =>
-                  Math.hypot(ball.x - a.x, ball.y - a.y) -
-                  Math.hypot(ball.x - b.x, ball.y - b.y)
-              )[0];
-        const rig = striker ? playerRigs[striker.rigSlot ?? striker.side] : undefined;
-        const diving = !serveHit && (striker?.lungeTicks ?? 0) > 0;
-        if (rig && striker) {
-          const kind: SwingKind =
-            serveHit || ball.z > 5.5 ? 'over' : swingSideKind(striker, ball, flip);
-          // reach-to-hit: contact beyond comfortable radius, but no dive
-          const contactDist = Math.hypot(ball.x - striker.x, ball.y - striker.y);
-          const stretch = !serveHit && !diving && contactDist > REACH + 0.2;
-          triggerSwing(rig, kind, ball.z < 2.5, now, stretch, power, true);
-          rig.swingMs /= Math.sqrt(heat); // hot rallies swing faster too
-          // dives track the LIVE ball with the arm; grounded strokes lock
-          // onto the frozen contact point
-          rig.contactPoint = diving ? null : ballPos3.clone();
-        }
-        if (ball.spinX !== 0) {
-          // SCREW SHOT launch: white-hot detonation — gold flame, purple
-          // arcs, and a shockwave ring racing out across the court
-          spawnBurst(ballPos3, 0xffffff, 18, 20, 0.9, -20);
-          spawnBurst(ballPos3, 0xffd040, 28, 30, 0.8, -25);
-          spawnBurst(ballPos3, 0xff7020, 20, 24, 0.7, -35);
-          spawnBurst(ballPos3, 0xc060ff, 20, 34, 0.85, -30);
-          shockStart = now;
-          shockPos.set(ballPos3.x, 0, ballPos3.z);
-          addShake(2.2);
-          playScrew(panOf(ballPos3.x));
-          window.dispatchEvent(new CustomEvent('dt-hit', { detail: { power: 1, screw: true } }));
-        } else {
-          impactFX(ballPos3, power);
-        }
-        // hitstop: a freeze-frame hit lands harder — extra crunch on top of
-        // the impact package, scaled to how long the server holds the ball
-        if ((ball.freezeTicks ?? 0) > 0) {
-          addShake(0.6 + (ball.freezeTicks ?? 0) * 0.08);
-          spawnBurst(ballPos3, 0xffffff, 18, 20, 0.9, -10);
-        }
-        bouncesSinceHit = 0;
+    const speed = Math.hypot(ball.vx, ball.vy, ball.vz);
+    const power = THREE.MathUtils.clamp((speed - 18) / 46, 0.1, 1);
+    // A kick is the moment a settled ball is suddenly moving fast, or the
+    // moment the last touch changes sides — the server writes both on the
+    // tick it strikes, so the boot meets the ball on screen.
+    const struck =
+      speed > 16 && (prevBallSpeed < 8 || ball.lastTouchSide !== prevLastTouchSide);
+    if (struck && prevLastTouchSide !== -1) {
+      // the striker is whoever on that side is closest to the ball
+      const striker = scene.players
+        .filter(p => p.side === ball.lastTouchSide)
+        .sort(
+          (a, b) =>
+            Math.hypot(ball.x - a.x, ball.y - a.y) - Math.hypot(ball.x - b.x, ball.y - b.y)
+        )[0];
+      const rig = striker ? playerRigs[striker.rigSlot ?? striker.side] : undefined;
+      if (rig && striker) {
+        const sliding = (striker.slideTicks ?? 0) > 0;
+        const chip = ball.vz > 9; // lofted: a chip, a cross, or a keeper's punt
+        const contactDist = Math.hypot(ball.x - striker.x, ball.y - striker.y);
+        const stretch = !sliding && contactDist > CONTROL_RADIUS + 0.8;
+        triggerKick(rig, chip ? 'chip' : 'drive', chip, now, stretch, power, true);
+        // a slide keeps its own timeline; a standing kick locks onto the ball
+        rig.contactPoint = sliding ? null : ballPos3.clone();
       }
-      prevLastHitSide = ball.lastHitSide;
-    } else {
-      prevLastHitSide = ball.lastHitSide;
+      impactFX(ballPos3, power);
+      bouncesSinceHit = 0;
     }
-    // bounce: server flips vz to upward when the ball hits the court
+    prevLastTouchSide = ball.lastTouchSide;
+    prevBallSpeed = speed;
+
+    // bounce: the server flips vz upward when the ball meets the turf
     if (prevBallVz < -8 && ball.vz > 1 && ball.z < 2) {
-      const dust = SURFACES[scene.court] ?? SURFACES[0];
+      const dust = SURFACES[scene.pitch] ?? SURFACES[0];
       spawnBurst(
         new THREE.Vector3(ballPos3.x, 0.15, ballPos3.z),
         new THREE.Color(dust.inner).getHex(),
-        10, 9, 0.85, -30
+        8, 8, 0.85, -30
       );
-      playBounce(panOf(ballPos3.x), BOUNCE_BRIGHT[scene.court] ?? 1);
+      playBounce(panOf(ballPos3.x), BOUNCE_BRIGHT[scene.pitch] ?? 1);
       bouncesSinceHit++;
-      // landed IN but within a racket's width of a line — the crowd gasps
-      // at the close call (mirrors the server's in/out margins)
-      if (scene.phase === PHASE_RALLY && bouncesSinceHit === 1 && ball.rallyHits > 0) {
-        const mx = COURT_HALF_WID + LINE_MARGIN - Math.abs(ball.x);
-        const my = COURT_HALF_LEN + LINE_MARGIN - Math.abs(ball.y);
-        if (mx >= 0 && my >= 0 && Math.min(mx, my) < 1.6) crowdOoh(0.6);
-      }
     }
     prevBallVz = ball.vz;
-    // ball appearing during the serve phase = the toss going up
-    if (!prevBallActive && scene.phase === PHASE_SERVE) playToss();
+    // a shot that whistles just past the frame gets a gasp from the stands
+    if (
+      scene.phase === PHASE_LIVE &&
+      Math.abs(ball.y) > PITCH_HALF_LEN - 6 &&
+      Math.abs(ball.vy) > 20 &&
+      Math.abs(Math.abs(ball.x) - GOAL_HALF_W) < 2.5 &&
+      ball.z < GOAL_HEIGHT + 3
+    ) {
+      crowdOoh(0.5);
+    }
     prevBallActive = true;
   } else {
     prevBallActive = false;
-    prevLastHitSide = -1;
+    prevLastTouchSide = -1;
     prevBallVz = 0;
+    prevBallSpeed = 0;
+  }
+  // a goal: the pause phase arriving with the ball dead behind a goal line
+  if (
+    scene.phase !== prevPhase &&
+    scene.phase === PHASE_PAUSE &&
+    ball &&
+    Math.abs(ball.y) > PITCH_HALF_LEN - 2 &&
+    Math.abs(ball.x) < GOAL_HALF_W + 1
+  ) {
+    playGoal();
+    addShake(2.2);
+    if (ballPos3) {
+      spawnBurst(ballPos3, 0xffffff, 22, 24, 0.9, -20);
+      spawnBurst(ballPos3, 0xffd040, 26, 28, 0.85, -25);
+    }
   }
   prevPhase = scene.phase;
 
@@ -3022,103 +2862,81 @@ export function drawScene(scene: Scene) {
     const near = pos.z > 0;
     const baseYaw = near ? Math.PI : 0;
 
-    // whiff: swing window expired without a contact event
-    if (rig.prevSwingTicks > 0 && pl.swingTicks === 0 && rig.swingStart < 0 && ball) {
-      triggerSwing(rig, swingSideKind(pl, ball, flip), ball.z < 2.5, now, false, 0.4);
+    // air-kick: the charge was released with nothing at the player's feet
+    if (rig.prevKickTicks > 0 && !pl.kickHeld && rig.kickStart < 0) {
+      triggerKick(rig, pl.kickKind === 1 ? 'chip' : 'drive', pl.kickKind === 1, now, false, 0.4);
       rig.contactPoint = null;
       playWhoosh(0.5);
     }
-    if (rig.prevSwingTicks === 0 && pl.swingTicks > 0) rig.windupStart = now;
-    rig.prevSwingTicks = pl.swingTicks;
+    if (rig.prevKickTicks === 0 && pl.kickTicks > 0) rig.windupStart = now;
+    rig.prevKickTicks = pl.kickTicks;
 
     const moving = pl.dirX !== 0 || pl.dirY !== 0;
-    const isServer =
-      scene.phase === PHASE_SERVE && (scene.serverRigSlot ?? scene.servingSide) === slot;
-    const tossing = isServer && !!ball;
-    const striking = pl.swingTicks > 0 || rig.swingStart >= 0 || tossing;
+    const striking = pl.kickHeld || rig.kickStart >= 0;
 
-    // facing priority: ball while striking > movement direction > face the net
+    // facing priority: ball while striking > movement direction > face upfield
     let yawTarget = baseYaw;
     let yawRate = 10;
     if (striking && ballPos3) {
-      const full = Math.atan2(ballPos3.x - pos.x, ballPos3.z - pos.z);
-      // stay between net-facing and square-to-ball (tennis players turn ~halfway)
-      yawTarget = baseYaw + wrapAngle(full - baseYaw) * 0.55;
+      yawTarget = Math.atan2(ballPos3.x - pos.x, ballPos3.z - pos.z);
       yawRate = 18;
     } else if (moving) {
       const mv = toThree(flip, pl.dirX, pl.dirY, 0);
       yawTarget = Math.atan2(mv.x, mv.z);
-      yawRate = 12;
+      yawRate = 14;
+    } else if (ballPos3) {
+      // standing still: turn to face the play, the way a footballer does
+      yawTarget = Math.atan2(ballPos3.x - pos.x, ballPos3.z - pos.z);
+      yawRate = 6;
     }
     rig.yaw = blendAngle(rig.yaw, yawTarget, yawRate, dt);
-
-    // hitstop: the hitter is locked in place server-side — hold their swing
-    // at the contact frame for the whole freeze instead of following through
-    if (ball && (ball.freezeTicks ?? 0) > 0 && ball.lastHitSide === side && rig.swingStart >= 0) {
-      rig.swingStart += dt * 1000;
-    }
 
     let target: Pose;
     let rate = 12;
     let swingT = -1;
-    if (rig.swingStart >= 0) {
-      const t = (now - rig.swingStart) / rig.swingMs;
+    if (rig.kickStart >= 0) {
+      const t = (now - rig.kickStart) / rig.kickMs;
       if (t >= 1) {
-        rig.swingStart = -1;
+        rig.kickStart = -1;
         rig.contactPoint = null;
         target = moving ? runPose(rig.runPhase, pl.dirX) : readyPose(now, rig.runSeed);
       } else {
         swingT = t;
-        target = swingPose(rig.swingKind, t, rig.swingLow, rig.swingPower);
-        rate = 30; // snap through the stroke
+        target = kickPose(rig.kickAnim, t, rig.kickLow, rig.kickPower);
+        rate = 30; // snap through the strike
       }
-    } else if (tossing) {
-      target = tossPose(ball ? ball.z : 6);
-      rate = 14;
-    } else if (pl.swingTicks > 0 && ball) {
-      target = windupPose(ball.z > 5.5 ? 'over' : swingSideKind(pl, ball, flip), ball.z < 2.5);
-      // the coil deepens the longer the button is held — never a frozen pose
-      const coil = 0.85 + 0.25 * Math.min(1, (now - rig.windupStart) / 300);
-      target.twist *= coil;
-      target.shRz *= coil;
+    } else if (pl.kickHeld) {
+      // the backlift deepens the longer the button is held, so the charge
+      // reads on the body from across the pitch
+      const charge = Math.min(1, (now - rig.windupStart) / (KICK_CHARGE_MS));
+      target = kickWindup(pl.kickKind === 1 ? 'chip' : 'drive', charge);
       rate = 22;
-      // FINISHER armed (HIT+LOB on a full meter): full power-up flare —
-      // a golden flame column, purple arcs, a pulsing ground ring, and a
-      // low rumble, so the charge reads from across the court
-      if (pl.swingKind === 2) {
-        // a fresh charge rolls a random aura palette for this buildup
+      // a fully wound-up shot flares: the striker glows and the ground ring
+      // pulses, so a screamer being loaded reads from across the pitch
+      if (charge > 0.75) {
         if (now - lastChargeAt[slot] > 250) {
           chargePalette[slot] = Math.floor(Math.random() * AURA_PALETTES.length);
         }
         lastChargeAt[slot] = now;
         const [flameCol, arcCol] = AURA_PALETTES[chargePalette[slot]];
-        if (now - lastChargeSpawn > 28) {
+        if (now - lastChargeSpawn > 40) {
           lastChargeSpawn = now;
           spawnBurst(
             new THREE.Vector3(
-              pos.x + Math.sin(now / 31 + side) * 0.9,
-              0.6 + Math.abs(Math.sin(now / 53)) * 2.6,
-              pos.z + Math.cos(now / 41 + side) * 0.9
+              pos.x + Math.sin(now / 31 + side) * 0.7,
+              0.4 + Math.abs(Math.sin(now / 53)) * 1.6,
+              pos.z + Math.cos(now / 41 + side) * 0.7
             ),
-            flameCol, 3, 7, 0.95, 42 // flames rise off the body
-          );
-          spawnBurst(
-            new THREE.Vector3(
-              pos.x + Math.cos(now / 23 + side * 2) * 1.1,
-              1.4 + Math.abs(Math.sin(now / 67)) * 2.0,
-              pos.z + Math.sin(now / 37 + side) * 1.1
-            ),
-            arcCol, 2, 9, 0.9, 30
+            flameCol, 2, 5, 0.9, 32
           );
         }
         auraRing.visible = true;
         auraRing.position.set(pos.x, 0.12, pos.z);
-        const ringPulse = 1 + 0.22 * Math.sin(now / 85);
+        const ringPulse = 0.75 + 0.18 * Math.sin(now / 85);
         auraRing.scale.set(ringPulse, ringPulse, ringPulse);
         const auraMat = auraRing.material as THREE.MeshBasicMaterial;
-        auraMat.opacity = 0.42 + 0.18 * Math.sin(now / 60);
+        auraMat.opacity = 0.3 + 0.16 * Math.sin(now / 60);
         auraMat.color.setHex(Math.sin(now / 150) > 0 ? flameCol : arcCol);
-        addShake(0.02);
       }
     } else if (moving) {
       target = runPose(rig.runPhase, pl.dirX);
@@ -3127,8 +2945,9 @@ export function drawScene(scene: Scene) {
       target = readyPose(now, rig.runSeed);
     }
 
-    // keep the feet running under an upper-body stroke (composite animation)
-    if (moving && (rig.swingStart >= 0 || pl.swingTicks > 0 || tossing)) {
+    // keep the feet running while a kick is only being CHARGED — the strike
+    // itself owns the legs, so it is never overwritten here
+    if (moving && rig.kickStart < 0 && pl.kickHeld) {
       const legs = runPose(rig.runPhase, pl.dirX);
       target.thighL = legs.thighL;
       target.calfL = legs.calfL;
@@ -3137,134 +2956,102 @@ export function drawScene(scene: Scene) {
       target.crouch = Math.max(target.crouch, legs.crouch);
     }
 
-    // dive bookkeeping: a fresh lunge starts the jump timeline. The size
-    // comes from the server's recovery ticks; the heading comes from where
-    // the leap actually travels (toward the ball) — a ball out front means
-    // a head-first forward dive, never a sideways flop.
-    if (pl.lungeTicks > 0 && rig.prevLunge === 0) {
-      rig.diveStart = now;
-      rig.diveDir = rig.swingKind === 'back' ? 1 : -1;
-      rig.diveKind = pl.lungeTicks >= 28 ? 2 : pl.lungeTicks >= 20 ? 1 : 0;
-      rig.diveMs = [420, 800, 1000][rig.diveKind] / heat; // hot rallies: faster jumps
+    // slide bookkeeping: a fresh tackle starts the lunge timeline. The server
+    // drives the body along its slide direction, so the heading comes from
+    // where the player is actually travelling.
+    if (pl.slideTicks > 0 && rig.prevSlide === 0) {
+      rig.slideStart = now;
+      rig.slideDir = 1;
+      rig.slideKindAnim = 1;
+      rig.slideMs = SLIDE_MS;
       const sv = toThree(flip, pl.serverX, pl.serverY, 0);
       const ddx = sv.x - rig.root.position.x;
       const ddz = sv.z - rig.root.position.z;
-      rig.diveYaw =
+      rig.slideYaw =
         ddx * ddx + ddz * ddz > 0.05 ? Math.atan2(ddx, ddz) : rig.yaw;
-      rig.diveFromX = rig.root.position.x;
-      rig.diveFromZ = rig.root.position.z;
-      rig.diveLanded = false;
+      rig.slideFromX = rig.root.position.x;
+      rig.slideFromZ = rig.root.position.z;
+      rig.slideLanded = false;
+      playSlide(panOf(rig.root.position.x));
     }
-    rig.prevLunge = pl.lungeTicks;
-    let diveT = rig.diveStart >= 0 ? (now - rig.diveStart) / rig.diveMs : -1;
-    if (diveT > 1) {
-      rig.diveStart = -1;
-      diveT = -1;
+    rig.prevSlide = pl.slideTicks;
+    let slideT = rig.slideStart >= 0 ? (now - rig.slideStart) / rig.slideMs : -1;
+    if (slideT > 1) {
+      rig.slideStart = -1;
+      slideT = -1;
     }
 
-    // reach-to-hit: lean the whole body into the shot (no dive)
-    if (rig.swingStretch && rig.swingStart >= 0 && diveT < 0) {
-      target.leanS = rig.swingKind === 'back' ? 0.6 : -0.6;
+    // stretching for a ball at the edge of reach: lean the whole body in
+    if (rig.kickStretch && rig.kickStart >= 0 && slideT < 0) {
+      target.leanS = -0.5;
       target.crouch = Math.max(target.crouch, 0.3);
-      target.thighL = rig.swingKind === 'fore' ? -0.8 : 0.35;
-      target.thighR = rig.swingKind === 'fore' ? 0.35 : -0.8;
     }
 
-    const landT = rig.diveKind === 0 ? 0.5 : 0.34; // when the body touches down
-    const slideEndT = 0.5; // brief slide only — back on their feet fast
-    if (diveT >= 0 && diveT < landT) {
-      // airborne: superman reach along the leap direction
-      target = diveFlightPose();
-      rate = 24;
-    } else if (rig.diveKind > 0 && diveT >= landT && diveT < slideEndT) {
-      // grounded slide: stay stretched, limbs settle with lag
-      target = diveFlightPose();
-      rate = 10;
-    } else if (diveT >= landT) {
+    // The server's slide is SLIDE_ACTIVE_AFTER ticks of lunge then a stun, so
+    // the body is down for the first ~40% and scrambling up after.
+    const landT = 0.12; // the hip hits the turf almost immediately
+    const slideEndT = 0.6;
+    if (slideT >= 0 && slideT < slideEndT) {
+      target = slideFlightPose();
+      rate = slideT < landT ? 26 : 12;
+    } else if (slideT >= slideEndT) {
       // scrambling back to their feet
-      target.crouch = Math.max(target.crouch, rig.diveKind === 0 ? 0.35 : 0.5);
-      target.leanF = 0.45;
+      target = slideRollPose(now, rig.runSeed, Math.max(0, 1 - (slideT - slideEndT) / 0.4));
+      rate = 12;
     }
     applyPose(rig, target, rate, dt, rig.yaw, now);
 
-    // dive root motion: turn to the leap heading, pitch head-first along it,
-    // slide briefly, then get up — no roll, motion stays continuous
-    if (diveT >= 0) {
-      const pitchMax = rig.diveKind === 0 ? 0.55 : Math.PI / 2;
-      const pitch =
-        rig.diveKind === 0
-          ? ch(diveT, [[0, 0], [0.22, pitchMax], [0.5, pitchMax], [0.78, 0], [1, 0]])
-          : ch(diveT, [[0, 0], [0.1, 0.4], [0.26, pitchMax], [slideEndT, pitchMax], [0.72, 0], [1, 0]]);
-      const apex = [0.8, 1.3, 1.6][rig.diveKind];
-      const height = ch(diveT, [
-        [0, 0], [0.16, apex], [landT, 0.5], [slideEndT, 0.32], [0.68, 0.02], [1, 0],
+    // slide root motion: turn along the lunge, go down on the hip, skid, then
+    // pick yourself up. The server owns the travel (it moves the player every
+    // tick of the lunge), so here we only tilt and drop the body.
+    if (slideT >= 0) {
+      const pitchMax = Math.PI / 2.15; // laid out along the ground
+      const pitch = ch(slideT, [
+        [0, 0], [landT, pitchMax], [slideEndT, pitchMax], [0.85, 0], [1, 0],
       ]);
-
-      // explosive leap travel: the body reaches the ball FAST (within the
-      // first ~55% of the flight window), because we move the player to the
-      // ball — never the ball to the player
-      const svNow = toThree(flip, pl.serverX, pl.serverY, 0);
-      if (diveT < landT) {
-        const kRaw = Math.min(1, diveT / (landT * 0.55));
-        const k = 1 - Math.pow(1 - kRaw, 2);
-        rig.root.position.x = THREE.MathUtils.lerp(rig.diveFromX, svNow.x, k);
-        rig.root.position.z = THREE.MathUtils.lerp(rig.diveFromZ, svNow.z, k);
-      } else {
-        rig.root.position.x = svNow.x;
-        rig.root.position.z = svNow.z;
-      }
-
-      if (diveT >= landT && !rig.diveLanded) {
-        rig.diveLanded = true;
-        const dust = SURFACES[scene.court] ?? SURFACES[0];
+      const height = ch(slideT, [
+        [0, 0], [landT, 0.35], [slideEndT, 0.25], [0.85, 0.02], [1, 0],
+      ]);
+      if (slideT >= landT && !rig.slideLanded) {
+        rig.slideLanded = true;
+        const dust = SURFACES[scene.pitch] ?? SURFACES[0];
         spawnBurst(
           new THREE.Vector3(rig.root.position.x, 0.3, rig.root.position.z),
           new THREE.Color(dust.inner).getHex(),
-          rig.diveKind === 0 ? 8 : 14, rig.diveKind === 0 ? 8 : 11, 0.8, -35
+          16, 12, 0.8, -35
         );
-        if (rig.diveKind > 0) addShake(0.35); // only big layouts rattle the camera
-        playDiveLand(panOf(rig.root.position.x));
+        addShake(0.3);
       }
-      _dq1.setFromAxisAngle(_UP, rig.diveYaw);
+      _dq1.setFromAxisAngle(_UP, rig.slideYaw);
       _dq2.setFromAxisAngle(_RIGHT, pitch);
       rig.root.quaternion.copy(_dq1).multiply(_dq2);
       rig.root.position.y = height;
-
-      // the racket chases the LIVE ball through the early flight — with the
-      // explosive travel the strings meet it within the first frames
-      if (ball && ballPos3 && diveT < 0.3) {
-        const w = (1 - diveT / 0.3) * 0.95;
-        if (w > 0.05) solveArmIK(rig, toThree(flip, ball.x, ball.y, ball.z), w);
-      }
     } else {
       rig.root.rotation.x = 0;
       rig.root.rotation.z = 0;
     }
 
-    // IK: through the contact window, pull the racket head onto the ball
-    // Contact solve, grounded strokes only (the dive owns its own motion):
-    // target the FROZEN contact point (not the departing ball), shift the
-    // whole body toward it so the racket must reach, then IK the arm on.
-    if (swingT >= 0.05 && swingT <= 0.55 && ball && ballPos3 && pl.lungeTicks === 0) {
+    // Contact: a footballer's boot has to meet the ball, so through the strike
+    // window the body steps in toward the frozen contact point (never the
+    // departing ball) until the kicking foot can plausibly reach it.
+    if (swingT >= 0.05 && swingT <= 0.55 && ball && ballPos3 && pl.slideTicks === 0) {
       const ikTarget = rig.contactPoint ?? toThree(flip, ball.x, ball.y, ball.z);
-      const peak = 1 - Math.abs(swingT - 0.28) / 0.27;
+      const peak = 1 - Math.abs(swingT - 0.3) / 0.27;
       const w = THREE.MathUtils.clamp(peak, 0, 1);
       if (w > 0.02) {
         const dx = ikTarget.x - rig.root.position.x;
         const dz = ikTarget.z - rig.root.position.z;
         const hDist = Math.hypot(dx, dz);
-        const over = Math.min(2.5, Math.max(0, hDist - 2.4));
+        const over = Math.min(2.0, Math.max(0, hDist - 1.6));
         if (over > 0 && hDist > 0.01) {
-          // programmatic step-in: the body moves so the strings meet the ball
           rig.root.position.x += (dx / hDist) * over * w;
           rig.root.position.z += (dz / hDist) * over * w;
         }
-        solveArmIK(rig, ikTarget, w * 0.95);
       }
     }
 
     // eyes on the ball: the head smoothly tracks it (not while tumbling)
-    if (ballPos3 && diveT < 0) {
+    if (ballPos3 && slideT < 0) {
       const hy = wrapAngle(
         Math.atan2(ballPos3.x - rig.root.position.x, ballPos3.z - rig.root.position.z) - rig.yaw
       );
@@ -3292,55 +3079,36 @@ export function drawScene(scene: Scene) {
     const bp = toThree(flip, ball.x, ball.y, ball.z);
     ballMesh.visible = true;
     ballMesh.position.copy(bp);
-    // screw shots burn white-hot with a flame tail; normal balls stay
-    // tennis-yellow
-    const screwing = ball.spinX !== 0;
-    // hitstop: the pinned ball strobes white so the freeze reads as impact,
-    // not lag
-    const frozen = (ball.freezeTicks ?? 0) > 0;
-    const strobe = frozen && Math.floor(now / 50) % 2 === 0;
     const ballMat = ballMesh.material as THREE.MeshLambertMaterial;
-    ballMat.color.setHex(strobe ? 0xffffff : screwing ? 0xffc850 : COLORS.ball);
-    ballMat.emissive.setHex(strobe ? 0xffffff : screwing ? 0xff4400 : 0x556600);
+    ballMat.color.setHex(COLORS.ball);
     if (gfx.trail) {
       for (let i = 0; i < trailMeshes.length; i++) {
         const tm = trailMeshes[i].material as THREE.MeshBasicMaterial;
-        tm.color.setHex(screwing ? FLAME_TRAIL[i] : COLORS.ball);
-        tm.opacity = screwing ? 0.55 * (1 - i / 8) : 0.22 * (1 - i / 7);
-        trailMeshes[i].scale.setScalar(screwing ? 1.7 : 1);
+        tm.color.setHex(COLORS.ball);
+        // only a properly struck ball leaves a streak
+        tm.opacity = 0.18 * (1 - i / 7);
+        trailMeshes[i].scale.setScalar(1);
       }
     }
-    if (screwing) {
-      // the fireball throws real light on the court and sheds flame as it flies
-      ballLight.position.set(bp.x, bp.y + 0.2, bp.z);
-      ballLight.intensity = 60 + Math.sin(now / 37) * 18;
-      if (now - lastFlameSpawn > 26) {
-        lastFlameSpawn = now;
-        spawnBurst(
-          bp,
-          FLAME_COLORS[Math.floor(Math.random() * FLAME_COLORS.length)],
-          3, 7, 0.85, 30 // positive "gravity": embers drift upward
-        );
-      }
-    } else {
-      ballLight.intensity = 0;
-    }
-    // stretch along velocity at speed for a sense of pace (not while frozen —
-    // the loaded launch velocity would stretch a ball that isn't moving)
+    ballLight.intensity = 0;
+    // A football ROLLS: spin it about the axis perpendicular to its travel,
+    // at the rate its own circumference demands, so the panels track the
+    // ground instead of skating over it.
     const vel3 = new THREE.Vector3(ball.vx * flip, ball.vz, -ball.vy * flip);
     const spd = vel3.length();
-    if (spd > 25 && !frozen) {
-      ballMesh.lookAt(bp.clone().add(vel3));
-      const st = 1 + Math.min(0.55, spd / 150);
-      ballMesh.scale.set(1 / Math.sqrt(st), 1 / Math.sqrt(st), st);
-    } else {
-      ballMesh.rotation.set(0, 0, 0);
-      ballMesh.scale.set(1, 1, 1);
+    ballMesh.scale.set(1, 1, 1);
+    if (spd > 0.5) {
+      const axis = new THREE.Vector3(0, 1, 0).cross(vel3).normalize();
+      if (axis.lengthSq() > 0.001) {
+        _dq3.setFromAxisAngle(axis, (spd / 0.55) * dt);
+        ballMesh.quaternion.premultiply(_dq3);
+      }
+      // a screamer stretches a touch along its flight for a sense of pace
+      if (spd > 40) {
+        const st = 1 + Math.min(0.3, (spd - 40) / 160);
+        ballMesh.scale.set(1 / Math.sqrt(st), 1 / Math.sqrt(st), st);
+      }
     }
-    // the fireball swells and throbs
-    if (screwing) ballMesh.scale.multiplyScalar(1.22 + Math.sin(now / 45) * 0.08);
-    // frozen ball swells and quivers in place for the whole hold
-    if (frozen) ballMesh.scale.multiplyScalar(1.3 + Math.sin(now / 28) * 0.12);
     ballBlob.visible = true;
     ballBlob.position.set(bp.x, 0.02, bp.z);
     const sc = Math.max(0.4, 1 - ball.z / 30);
@@ -3383,71 +3151,7 @@ export function drawScene(scene: Scene) {
     }
   }
 
-  // --- VAR review: Hawk-Eye flight tube + bounce mark -----------------------
-  const vr = scene.varReview;
-  if (vr && vr.trail.length >= 2) {
-    if (varTrailFor !== vr.trail) {
-      // one build per replay: the full path is known up front, playback just
-      // reveals it via drawRange
-      varTrailFor = vr.trail;
-      if (varTrailMesh) {
-        scene3.remove(varTrailMesh);
-        varTrailMesh.geometry.dispose();
-        (varTrailMesh.material as THREE.Material).dispose();
-      }
-      const pts = vr.trail.map(p => toThree(flip, p.x, p.y, Math.max(0.12, p.z)));
-      varTrailSegs = Math.min(240, Math.max(16, pts.length * 3));
-      varTrailMesh = new THREE.Mesh(
-        new THREE.TubeGeometry(
-          new THREE.CatmullRomCurve3(pts), varTrailSegs, 0.32, VAR_TRAIL_RADIAL, false
-        ),
-        new THREE.MeshBasicMaterial({
-          color: 0x38c8ff, transparent: true, opacity: 0.8, depthWrite: false,
-        })
-      );
-      scene3.add(varTrailMesh);
-    }
-    varTrailMesh!.visible = true;
-    const seg = Math.floor(THREE.MathUtils.clamp(vr.progress, 0, 1) * varTrailSegs);
-    varTrailMesh!.geometry.setDrawRange(0, seg * VAR_TRAIL_RADIAL * 6);
-  } else if (varTrailMesh) {
-    varTrailMesh.visible = false;
-  }
-  if (vr?.mark) {
-    varMarkGroup.visible = true;
-    const mp = toThree(flip, vr.mark.x, vr.mark.y, 0);
-    varMarkGroup.position.set(mp.x, 0.02, mp.z);
-    const dv = toThree(flip, vr.mark.dx, vr.mark.dy, 0);
-    if (Math.hypot(dv.x, dv.z) > 0.01) varMarkGroup.rotation.y = Math.atan2(-dv.z, dv.x);
-    varMarkGroup.scale.set(1.65, 1, 1); // impact print smears along the travel
-    const mat = varMarkDisc.material as THREE.MeshBasicMaterial;
-    mat.color.setHex(
-      vr.call === 'OUT' ? 0xff4030
-      : vr.call === 'NET' ? 0xffb020
-      : vr.call === 'IN' ? 0x30d860
-      : 0xf0f0f0
-    );
-    mat.opacity = 0.92 + 0.07 * Math.sin(now / 150); // near-solid print, subtle pulse
-  } else {
-    varMarkGroup.visible = false;
-  }
-
-  if (vr?.overhead && vr.mark) {
-    // HAWK-EYE VERDICT CAM: cut to a near-top-down shot over the mark and
-    // ease down toward it while the call holds on screen
-    replayLook = null;
-    const varFov = fovForAspect(38);
-    if (Math.abs(camera.fov - varFov) > 0.05) {
-      camera.fov = varFov;
-      camera.updateProjectionMatrix();
-    }
-    const mp = toThree(flip, vr.mark.x, vr.mark.y, 0);
-    if (varCamH <= 0) varCamH = 46; // fresh cut — start high
-    varCamH += (24 - varCamH) * (1 - Math.exp(-1.5 * dt));
-    // slight tilt (camera offset along z) keeps depth cues and a valid up axis
-    camera.position.set(mp.x, varCamH, mp.z + varCamH * 0.3);
-    camera.lookAt(mp.x, 0, mp.z);
-  } else if (scene.replayCam) {
+  if (scene.replayCam) {
     // broadcast side camera for replays — steady, no shake
     const replayFov = fovForAspect(42);
     if (Math.abs(camera.fov - replayFov) > 0.05) {
@@ -3471,8 +3175,7 @@ export function drawScene(scene: Scene) {
   } else {
     replayLook = null;
     varCamH = 0;
-    // rally heat subtly zooms the camera in for intensity
-    const baseFov = 46 + (heat - 1) * 4;
+    const baseFov = 46;
     const targetFov = fovForAspect(baseFov);
     if (Math.abs(camera.fov - targetFov) > 0.05) {
       camera.fov = targetFov;
@@ -3509,13 +3212,6 @@ function animateCrowd(now: number) {
       s.mesh.material = fr ? crowdMatB : crowdMatA;
     }
   }
-}
-
-// Forehand or backhand, from which side the ball approaches in facing space.
-function swingSideKind(pl: RenderPlayer, ball: RenderBall, flip: number): SwingKind {
-  const facing = pl.y * flip < 0 ? -1 : 1; // near player faces -z
-  const localX = (ball.x - pl.x) * flip * -facing;
-  return localX >= 0 ? 'fore' : 'back';
 }
 
 function wrapAngle(a: number): number {

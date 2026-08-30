@@ -2,8 +2,11 @@ import './update-check';
 import { DbConnection } from './module_bindings';
 import type { Identity } from 'spacetimedb';
 import {
-  SPACETIMEDB_URI, DATABASE_NAME, GRAVITY, PLAYER_SPEED, CHAR_SPEED,
-  COURT_HALF_WID, COURT_HALF_LEN, LINE_MARGIN, TICK_HZ,
+  SPACETIMEDB_URI, DATABASE_NAME, GRAVITY, PLAYER_SPEED, CHAR_SPEED, TICK_HZ,
+  PHASE_KICKOFF, PHASE_LIVE, PHASE_PAUSE, PHASE_OVER,
+  KICK_NORMAL, KICK_CHIP, KICK_CHARGE_SECS, STAMINA_MAX,
+  RK_NONE, RK_KICKOFF, RK_KICKIN, RK_GOALKICK, RK_CORNER, RK_HALFTIME, RK_OVERTIME, RK_DROP,
+  HALF_SECONDS, OT_SECONDS, ROLE_KEEPER,
   totalXpFor, levelFor, LEVEL_MAX, CLAIM_UNLOCK_SECS,
 } from './config';
 import {
@@ -32,20 +35,17 @@ import {
   sceneIsAnimating,
   canvasCssSize,
   type Scene,
-  type VarReview,
 } from './render';
-import { CHARACTERS, COURTS, STAT_LABELS, type Character } from './characters';
+import { CHARACTERS, PITCHES, STAT_LABELS, type Character } from './characters';
 import {
   unlockAudio,
-  playPoint,
+  playGoalJingle,
   playCountdown,
   playGo,
-  playCharge,
-  playNetCord,
+  playWhistle,
   playDing,
-  playSplash,
   playEmote,
-  playToss,
+  playBlip,
   getAudio,
   setAudio,
   onAudioChange,
@@ -54,11 +54,9 @@ import {
   crowdSetHype,
   crowdCheer,
   crowdRoar,
-  crowdOoh,
-  crowdGroan,
   crowdMurmur,
 } from './audio';
-import { initTouch, touchDir, setTouchVisible, touchAvailable } from './touch';
+import { initTouch, touchDir, touchSprint, setTouchVisible, touchAvailable } from './touch';
 import {
   getGraphics,
   setGraphics,
@@ -69,11 +67,16 @@ import {
   type PresetName,
 } from './graphics';
 
-// Match phases (mirror spacetimedb/src/index.ts)
-const PHASE_SERVE = 1;
-const PHASE_RALLY = 2;
-const PHASE_POINT_OVER = 3;
-const PHASE_GAME_OVER = 4;
+// Restart kinds, as the banner names them (index = match.restartKind).
+const RESTART_NAMES: Record<number, string> = {
+  [RK_KICKOFF]: 'KICK OFF',
+  [RK_KICKIN]: 'KICK-IN',
+  [RK_GOALKICK]: 'GOAL KICK',
+  [RK_CORNER]: 'CORNER',
+  [RK_HALFTIME]: 'HALF-TIME',
+  [RK_OVERTIME]: 'GOLDEN GOAL',
+  [RK_DROP]: 'DROP BALL',
+};
 
 // Match lifecycle
 const M_PENDING = 0;
@@ -92,17 +95,6 @@ const MODE_TOURNAMENT = 1;
 const L_OPEN = 0;
 const L_RUNNING = 1;
 const L_FINISHED = 2;
-
-// Rulesets (mirror spacetimedb/src/index.ts)
-const RULES_TENNIS = 0;
-const RULES_BEERPONG = 1;
-const RULES_TARGETS = 2;
-const TARGET_BALLS = 20;
-const CUPS_PER_SIDE = 6;
-// Match format (mirror spacetimedb/src/index.ts): a match is a single set.
-// First to gamesToWin takes it outright — no 2-game margin — so a race to N
-// can run to 2N-1 games at the very most.
-const bestOf = (gamesToWin: number) => gamesToWin * 2 - 1;
 
 // Betting (mirror spacetimedb/src/index.ts). The server is the authority on
 // every rule here — these only shape what the UI offers.
@@ -126,7 +118,7 @@ const overlays = {
   connecting: $('connecting'),
   menu: $('menu'),
   selectPlayer: $('select-player'),
-  selectCourt: $('select-court'),
+  selectPitch: $('select-court'),
   waiting: $('waiting'),
   gameover: $('gameover'),
 };
@@ -239,27 +231,9 @@ let reconnecting = false;
 
 // per-match latest ball snapshot for client-side extrapolation
 const ballSnapshots = new Map<string, { row: any; at: number }>();
-// Per-match FIRST bounce of the shot currently in the air, taken straight
-// from the server tick where the ball row's `bounces` flips 0 -> 1: the exact
-// landing the in/out rule was applied to. Every hit resets `bounces`, so an
-// entry here always belongs to the shot in flight. VAR needs it because the
-// ball row comes to rest wherever the point DIED — on a rally won by a double
-// bounce that is the SECOND bounce, usually well past the line.
-const ballFirstBounce = new Map<
-  string,
-  { x: number; y: number; vx: number; vy: number; hitSide: number; at: number }
->();
 
-function noteBallRow(row: any, old: any | null) {
-  const key = String(row.matchId);
-  if (row.bounces === 0) ballFirstBounce.delete(key);
-  else if (!old || old.bounces === 0) {
-    ballFirstBounce.set(key, {
-      x: row.x, y: row.y, vx: row.vx, vy: row.vy,
-      hitSide: row.lastHitSide, at: performance.now(),
-    });
-  }
-  ballSnapshots.set(key, { row, at: performance.now() });
+function noteBallRow(row: any) {
+  ballSnapshots.set(String(row.matchId), { row, at: performance.now() });
 }
 
 // Reconnect backoff, shared by a failed attempt and a dropped socket. The
@@ -345,7 +319,7 @@ async function connect() {
             'SELECT * FROM player',
             'SELECT * FROM ball',
             'SELECT * FROM chat',
-            'SELECT * FROM target',
+            'SELECT * FROM goal_event',
             'SELECT * FROM team',
             'SELECT * FROM wallet',
             'SELECT * FROM bet',
@@ -381,11 +355,10 @@ async function connect() {
     })
     .build();
 
-  conn.db.ball.onInsert((_ctx, row) => noteBallRow(row, null));
-  conn.db.ball.onUpdate((_ctx, old, row) => noteBallRow(row, old));
+  conn.db.ball.onInsert((_ctx, row) => noteBallRow(row));
+  conn.db.ball.onUpdate((_ctx, _old, row) => noteBallRow(row));
   conn.db.ball.onDelete((_ctx, row) => {
     ballSnapshots.delete(String(row.matchId));
-    ballFirstBounce.delete(String(row.matchId));
   });
   conn.db.player.onInsert((_ctx, row) =>
     playerStamp.set(row.identity.toHexString(), performance.now())
@@ -417,18 +390,22 @@ async function connect() {
 const playerStamp = new Map<string, number>();
 const smoothPos = new Map<string, { x: number; y: number }>();
 
-function renderPosition(p: any, now: number, frameDt: number, heat = 1): { x: number; y: number } {
+// Sprint multiplier — mirrors SPRINT_MUL in spacetimedb/src/index.ts.
+const SPRINT_MUL = 1.34;
+
+function renderPosition(p: any, now: number, frameDt: number): { x: number; y: number } {
   const hex = p.identity.toHexString();
-  const lunging = (p.lungeTicks ?? 0) > 0;
+  const sliding = (p.slideTicks ?? 0) > 0;
   const stamped = playerStamp.get(hex) ?? now;
-  const elapsed = lunging ? 0 : Math.min(0.1, (now - stamped) / 1000);
-  const speed = PLAYER_SPEED * (CHAR_SPEED[p.characterId] ?? 1) * heat;
+  const elapsed = sliding ? 0 : Math.min(0.1, (now - stamped) / 1000);
+  const speed =
+    PLAYER_SPEED * (CHAR_SPEED[p.characterId] ?? 1) * (p.sprinting ? SPRINT_MUL : 1);
   const len = Math.hypot(p.dirX, p.dirY) || 1;
   const tx = p.x + (p.dirX / len) * speed * elapsed;
   const ty = p.y + (p.dirY / len) * speed * elapsed;
   let sp = smoothPos.get(hex);
   if (!sp || Math.hypot(sp.x - tx, sp.y - ty) > 12) sp = { x: tx, y: ty };
-  const alpha = 1 - Math.exp(-frameDt * (lunging ? 4.5 : 16));
+  const alpha = 1 - Math.exp(-frameDt * (sliding ? 4.5 : 16));
   sp = { x: sp.x + (tx - sp.x) * alpha, y: sp.y + (ty - sp.y) * alpha };
   smoothPos.set(hex, sp);
   return sp;
@@ -590,10 +567,11 @@ function isMyMatch(lobbyId: bigint, m: any): boolean {
 const fmtOdds = (milli: number) => `${(milli / 1000).toFixed(2)}×`;
 const fmtCr = (n: number) => n.toLocaleString('en-US');
 
-// Beer pong cups / practice bullseyes for a match (dead ones included).
-function matchTargets(matchId: bigint): any[] {
+// Every goal scored in a match, oldest first — the pause card lists scorers.
+function goalsFor(matchId: bigint): any[] {
   const out: any[] = [];
-  for (const t of conn.db.target.iter()) if (t.matchId === matchId) out.push(t);
+  for (const g of conn.db.goalEvent.iter()) if (g.matchId === matchId) out.push(g);
+  out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   return out;
 }
 
@@ -879,7 +857,7 @@ let pendingCode = '';
 // then falls back to whatever else is running in the room
 let spectateMatchId: bigint | null = null;
 let selectedChar = Math.min(CHARACTERS.length - 1, Number(localStorage.getItem('df_char') ?? 0) || 0);
-let selectedCourt = 0;
+let selectedPitch = 0;
 let selectedConcurrent = 2;
 let selectedFormat = Math.min(1, Number(localStorage.getItem('df_format') ?? 0) || 0);
 let selectedBotLevel = Math.min(2, Number(localStorage.getItem('df_bot') ?? 1) || 0);
@@ -892,42 +870,42 @@ const VISIBILITY_OPTIONS = [
 ];
 
 const TEAM_SIZE_OPTIONS = [
-  { id: 1, name: '1V1 SINGLES', desc: 'CLASSIC HEAD-TO-HEAD' },
-  { id: 2, name: '2V2 DOUBLES', desc: 'FOUR PLAYERS · TWO PER SIDE' },
-  { id: 3, name: '3V3 TRIPLES', desc: 'SIX PLAYERS · THREE PER SIDE' },
+  { id: 1, name: '1V1 SOLO', desc: 'ONE OUTFIELD PLAYER A SIDE (PLUS KEEPERS)' },
+  { id: 2, name: '2V2', desc: 'FOUR PLAYERS · TWO PER SIDE' },
+  { id: 3, name: '3V3', desc: 'SIX PLAYERS · THREE PER SIDE' },
 ];
 
 // Custom rules — ball physics (percent sliders; 100 = standard)
 interface PhysSlider {
-  key: 'gravityMul' | 'dragMul' | 'speedMul' | 'bounceMul';
+  key: 'gravityMul' | 'frictionMul' | 'powerMul' | 'bounceMul';
   label: string;
   min: number;
   max: number;
   def: number;
 }
 const PHYS_SLIDERS: PhysSlider[] = [
-  { key: 'gravityMul', label: 'WEIGHT', min: 30, max: 250, def: 100 },
-  { key: 'dragMul', label: 'AIR DRAG', min: 0, max: 60, def: 0 },
-  { key: 'speedMul', label: 'POWER', min: 50, max: 180, def: 100 },
+  { key: 'gravityMul', label: 'BALL WEIGHT', min: 30, max: 250, def: 100 },
+  { key: 'frictionMul', label: 'FRICTION', min: 30, max: 220, def: 100 },
+  { key: 'powerMul', label: 'KICK POWER', min: 50, max: 180, def: 100 },
   { key: 'bounceMul', label: 'BOUNCE', min: 40, max: 160, def: 100 },
 ];
 const PHYS_PRESETS: { name: string; v: [number, number, number, number] }[] = [
-  { name: 'STANDARD', v: [100, 0, 100, 100] },
-  { name: 'MOON BALL', v: [45, 0, 85, 125] },
-  { name: 'CANNON', v: [140, 0, 155, 70] },
-  { name: 'BALLOON', v: [60, 40, 80, 110] },
+  { name: 'STANDARD', v: [100, 100, 100, 100] },
+  { name: 'MOON BALL', v: [45, 70, 85, 125] },
+  { name: 'CANNON', v: [140, 100, 165, 70] },
+  { name: 'BEACH BALL', v: [55, 130, 80, 150] },
 ];
 const physValues: Record<PhysSlider['key'], number> = (() => {
   try {
     const saved = JSON.parse(localStorage.getItem('df_phys') ?? '{}');
     return {
       gravityMul: Number(saved.gravityMul) || 100,
-      dragMul: Number.isFinite(Number(saved.dragMul)) ? Number(saved.dragMul) : 0,
-      speedMul: Number(saved.speedMul) || 100,
+      frictionMul: Number(saved.frictionMul) || 100,
+      powerMul: Number(saved.powerMul) || 100,
       bounceMul: Number(saved.bounceMul) || 100,
     };
   } catch {
-    return { gravityMul: 100, dragMul: 0, speedMul: 100, bounceMul: 100 };
+    return { gravityMul: 100, frictionMul: 100, powerMul: 100, bounceMul: 100 };
   }
 })();
 
@@ -935,8 +913,8 @@ function physPayload() {
   localStorage.setItem('df_phys', JSON.stringify(physValues));
   return {
     gravityMul: physValues.gravityMul / 100,
-    dragMul: physValues.dragMul / 100,
-    speedMul: physValues.speedMul / 100,
+    frictionMul: physValues.frictionMul / 100,
+    powerMul: physValues.powerMul / 100,
     bounceMul: physValues.bounceMul / 100,
   };
 }
@@ -951,9 +929,9 @@ const FORMAT_CARDS = [
 const FORMAT_NAMES = ['SINGLE ELIMINATION', 'DOUBLE ELIMINATION'];
 
 const BOT_LEVEL_CARDS = [
-  { id: 0, name: 'EASY', desc: 'SLOW · MISSES A LOT' },
-  { id: 1, name: 'NORMAL', desc: 'FAIR FIGHT' },
-  { id: 2, name: 'HARD', desc: 'FAST · DIVES · PUNISHES' },
+  { id: 0, name: 'EASY', desc: 'SLOW · LOOSE TOUCH' },
+  { id: 1, name: 'NORMAL', desc: 'FAIR GAME' },
+  { id: 2, name: 'HARD', desc: 'FAST · TACKLES · PUNISHES' },
 ];
 
 const cssHex = (n: number) => `#${n.toString(16).padStart(6, '0')}`;
@@ -994,8 +972,8 @@ function buildSelectGrids() {
   }
   staggerChildren(charGrid);
   initCharacterPreviews($('char-preview') as HTMLCanvasElement, previewSlots, charGrid);
-  const courtGrid = $('court-grid');
-  for (const c of COURTS) {
+  const pitchGrid = $('court-grid');
+  for (const c of PITCHES) {
     const card = document.createElement('button');
     card.className = 'sel-card';
     card.dataset.id = String(c.id);
@@ -1003,12 +981,12 @@ function buildSelectGrids() {
       `<span class="court-thumb" style="--surf:${c.css}"><span class="ct-lines"></span></span>` +
       `<div class="cname">${c.name}</div><div class="cmeta">${c.desc}</div>`;
     card.addEventListener('click', () => {
-      selectedCourt = c.id;
+      selectedPitch = c.id;
       refreshSelection();
     });
-    courtGrid.appendChild(card);
+    pitchGrid.appendChild(card);
   }
-  staggerChildren(courtGrid);
+  staggerChildren(pitchGrid);
   const formatGrid = $('format-grid');
   for (const f of FORMAT_CARDS) {
     const card = document.createElement('button');
@@ -1028,7 +1006,7 @@ function buildSelectGrids() {
     const card = document.createElement('button');
     card.className = 'sel-card conc-card';
     card.dataset.id = String(n);
-    card.title = `${n} court${n > 1 ? 's' : ''} at once`;
+    card.title = `${n} pitch${n > 1 ? 'es' : ''} at once`;
     card.innerHTML = `<div class="cname">${n}</div>`;
     card.addEventListener('click', () => {
       selectedConcurrent = n;
@@ -1042,7 +1020,7 @@ function buildSelectGrids() {
     card.className = 'sel-card';
     card.dataset.id = String(opt.id);
     card.title = opt.desc;
-    card.innerHTML = `<div class="cname">${opt.id === 2 ? '👥' : '🎾'} ${opt.name}</div>`;
+    card.innerHTML = `<div class="cname">${opt.id === 2 ? '👥' : '⚽'} ${opt.name}</div>`;
     card.addEventListener('click', () => {
       selectedTeamSize = opt.id;
       localStorage.setItem('df_team', String(opt.id));
@@ -1125,7 +1103,7 @@ function refreshPhysSliders() {
   updateRulesSummary();
 }
 
-// The Custom Rules row on the court screen shows what the submenu holds.
+// The Custom Rules row on the pitch screen shows what the submenu holds.
 function physPresetName(): string {
   for (const p of PHYS_PRESETS) {
     if (PHYS_SLIDERS.every((s, i) => physValues[s.key] === p.v[i])) return p.name;
@@ -1140,7 +1118,7 @@ function updateRulesSummary() {
   }
   if (pendingAction === 'tournament') {
     bits.push(FORMAT_CARDS[selectedFormat]?.name ?? '');
-    if (selectedConcurrent > 1) bits.push(`${selectedConcurrent} COURTS`);
+    if (selectedConcurrent > 1) bits.push(`${selectedConcurrent} PITCHES`);
   }
   $('rules-summary').textContent = bits.filter(Boolean).join(' · ');
 }
@@ -1150,7 +1128,7 @@ function refreshSelection() {
     card.classList.toggle('selected', card.getAttribute('data-id') === String(selectedChar));
   }
   for (const card of document.querySelectorAll('#court-grid .sel-card')) {
-    card.classList.toggle('selected', card.getAttribute('data-id') === String(selectedCourt));
+    card.classList.toggle('selected', card.getAttribute('data-id') === String(selectedPitch));
   }
   for (const card of document.querySelectorAll('#concurrent-grid .sel-card')) {
     card.classList.toggle('selected', card.getAttribute('data-id') === String(selectedConcurrent));
@@ -1210,7 +1188,7 @@ $('char-confirm').addEventListener('click', () => {
     // solo practice has nothing to list publicly
     $('visibility-section').classList.toggle('hidden', pendingAction === 'practice');
     updateRulesSummary();
-    showOverlay('selectCourt');
+    showOverlay('selectPitch');
   }
 });
 $('court-back').addEventListener('click', () => showOverlay('selectPlayer'));
@@ -1220,16 +1198,16 @@ $('court-confirm').addEventListener('click', () => {
   const phys = physPayload();
   if (pendingAction === 'create') {
     conn.reducers.createLobby({
-      court: selectedCourt, ruleset: RULES_TENNIS, isPublic: selectedPublic,
+      pitch: selectedPitch, isPublic: selectedPublic,
       teamSize: selectedTeamSize, ...phys,
     });
   } else if (pendingAction === 'practice') {
     conn.reducers.createPractice({
-      court: selectedCourt, ruleset: RULES_TENNIS, botLevel: selectedBotLevel, ...phys,
+      pitch: selectedPitch, botLevel: selectedBotLevel, ...phys,
     });
   } else if (pendingAction === 'tournament') {
     conn.reducers.createTournament({
-      court: selectedCourt, concurrent: selectedConcurrent, isPublic: selectedPublic,
+      pitch: selectedPitch, concurrent: selectedConcurrent, isPublic: selectedPublic,
       format: selectedFormat, teamSize: selectedTeamSize, ...phys,
     });
   }
@@ -1330,7 +1308,7 @@ function updateLobbyBrowser() {
     const isTournament = l.mode === MODE_TOURNAMENT;
     const players = counts.get(String(l.id)) ?? 0;
     const host = playerByIdentity(l.hostId)?.name || 'PLAYER';
-    const court = COURTS[l.court ?? 0];
+    const pitch = PITCHES[l.pitch ?? 0];
     const capacity = (l.teamSize ?? 1) * 2;
     const full = isTournament && players >= MAX_TOURNAMENT_PLAYERS;
     const slots = isTournament
@@ -1343,9 +1321,9 @@ function updateLobbyBrowser() {
           ? '🏆 TOURNEY'
           : capacity > 2
             ? `👥 ${capacity / 2}V${capacity / 2}`
-            : '🎾 1V1',
+            : '⚽ 1V1',
         `${host}'S ${isTournament ? 'TOURNAMENT' : 'MATCH'}`,
-        `${court?.name ?? '?'} · ${slots} PLAYERS`,
+        `${pitch?.name ?? '?'} · ${slots} PLAYERS`,
         full ? 'Full' : 'Join',
         '',
         () => startFlow('join', l.code),
@@ -1373,10 +1351,8 @@ function liveMatchRows(): { match: any; lobby: any }[] {
   return out;
 }
 
-function scoreLine(m: any, ruleset: number): string {
-  if (ruleset === RULES_BEERPONG) return `CUPS ${m.p0Points}-${m.p1Points}`;
-  const [a, b] = pointStrings(m);
-  return `GAMES ${m.p0Games}-${m.p1Games} · ${a}-${b}`;
+function scoreLine(m: any): string {
+  return `${m.p0Goals}-${m.p1Goals} · ${halfLabel(m)} ${clockText(m)}`;
 }
 
 function updateLiveMatches() {
@@ -1393,7 +1369,7 @@ function updateLiveMatches() {
     .map(({ match: m, lobby: l }) => {
       const p0 = playerByIdentity(m.p0Id)?.name ?? '';
       const p1 = playerByIdentity(m.p1Id)?.name ?? '';
-      return `${m.id}:${p0}v${p1}:${scoreLine(m, l.ruleset ?? RULES_TENNIS)}:${watchers.get(String(l.id)) ?? 0}`;
+      return `${m.id}:${p0}v${p1}:${scoreLine(m)}:${watchers.get(String(l.id)) ?? 0}`;
     })
     .join('|');
   if (key === lastLiveListKey) return;
@@ -1407,18 +1383,16 @@ function updateLiveMatches() {
   }
   for (const { match: m, lobby: l } of rows) {
     const isTournament = l.mode === MODE_TOURNAMENT;
-    const ruleset = l.ruleset ?? RULES_TENNIS;
     const p0 = playerByIdentity(m.p0Id)?.name || 'PLAYER 1';
     const p1 = playerByIdentity(m.p1Id)?.name || 'PLAYER 2';
-    const court = COURTS[l.court ?? 0];
+    const pitch = PITCHES[l.pitch ?? 0];
     const eyes = watchers.get(String(l.id)) ?? 0;
-    const bits = [court?.name ?? '?', scoreLine(m, ruleset)];
-    if (ruleset === RULES_BEERPONG) bits.unshift('🍺');
+    const bits = [pitch?.name ?? '?', scoreLine(m)];
     if (eyes) bits.push(`👁 ${eyes}`);
     list.appendChild(
       lobbyRow(
         ' live',
-        isTournament ? `🏆 ROUND ${m.round}` : '🔴 1V1',
+        isTournament ? `🏆 ROUND ${m.round}` : '🔴 LIVE',
         `${p0} vs ${p1}`,
         bits.join(' · '),
         'Watch',
@@ -1429,8 +1403,8 @@ function updateLiveMatches() {
   }
 }
 
-// Watch a live match: no character to pick, no court to choose — go straight
-// to the court as a spectator.
+// Watch a live match: no character to pick, no pitch to choose — go straight
+// to the touchline as a spectator.
 function spectate(matchId: bigint) {
   // same required gate as startFlow: watchers chat under their name
   if (!storedName()) {
@@ -1440,7 +1414,7 @@ function spectate(matchId: bigint) {
   spectateMatchId = matchId;
   conn.reducers.setName({ name: playerName() });
   conn.reducers.spectateMatch({ matchId });
-  setStatus('TAKING YOUR SEAT…');
+  setStatus('TAKING YOUR SEAT IN THE STAND…');
   setTimeout(() => {
     const me = getMyPlayer();
     if (!me || me.lobbyId === 0n) {
@@ -1524,7 +1498,7 @@ function onSubscribed() {
 // Input
 // ---------------------------------------------------------------------------
 const pressed = new Set<string>();
-let lastSent = { dirX: 0, dirY: 0 };
+let lastSent = { dirX: 0, dirY: 0, sprint: false };
 
 const MOVE_KEYS: Record<string, [number, number]> = {
   ArrowUp: [0, 1],
@@ -1536,32 +1510,16 @@ const MOVE_KEYS: Record<string, [number, number]> = {
   KeyA: [-1, 0],
   KeyD: [1, 0],
 };
-const HIT_KEYS = new Set(['Space', 'KeyJ']);
-const LOB_KEYS = new Set(['KeyK', 'ShiftLeft', 'ShiftRight']);
+// KICK is press-to-charge / release-to-strike; CHIP is the same with a lofted
+// kind; SLIDE is a one-shot lunge with nothing to release. SPRINT is a held
+// modifier folded into setInput.
+const KICK_KEYS = new Set(['Space', 'KeyJ']);
+const CHIP_KEYS = new Set(['KeyK', 'ShiftRight']);
+const SLIDE_KEYS = new Set(['KeyL', 'ControlLeft', 'ControlRight']);
+const SPRINT_KEYS = new Set(['ShiftLeft']);
 
-// SUPER FINISHER (mirror spacetimedb/src/index.ts): with a FULL meter,
-// pressing HIT and LOB together (within a beat) arms the screw-shot finisher.
-const MOMENTUM_MAX = 1000;
-const SWING_SUPER = 2;
-const SUPER_COMBO_MS = 200;
-let lastSwingPress = { kind: -1, at: -1e9 };
-
-function pressSwing(kind: number) {
-  const now = performance.now();
-  const me = getMyPlayer();
-  const meterFull = (me?.momentum ?? 0) >= MOMENTUM_MAX;
-  if (
-    meterFull &&
-    lastSwingPress.kind >= 0 &&
-    lastSwingPress.kind !== kind &&
-    now - lastSwingPress.at < SUPER_COMBO_MS
-  ) {
-    conn.reducers.swing({ kind: SWING_SUPER });
-    localSuperAt = now; // the finisher cinematic can start before the server confirms
-  } else {
-    conn.reducers.swing({ kind });
-  }
-  lastSwingPress = { kind, at: now };
+function pressKick(kind: number) {
+  conn.reducers.kick({ kind });
 }
 const EMOTE_KEYS: Record<string, number> = {
   Digit1: 0, Digit2: 1, Digit3: 2, Digit4: 3,
@@ -1609,17 +1567,36 @@ window.addEventListener('gamepadconnected', () => {
   padUsedAt = performance.now();
 });
 
-const gpPrev = [false, false];
+// Ⓐ KICK · Ⓑ CHIP · Ⓧ SLIDE · right trigger SPRINT.
+const GP_KICK = 0;
+const GP_CHIP = 1;
+const GP_SLIDE = 2;
+const GP_SPRINT = 7;
+const gpPrev: Record<number, boolean> = {};
+// Read by the frame loop alongside the stick, so the sprint bit rides along
+// on the same setInput the direction does.
+let padSprint = false;
+
 function pollGamepad(): [number, number] | null {
   const gp = activePad();
-  if (!gp) return null;
-  for (const [btn, kind] of [[0, 0], [1, 1]] as const) {
-    const down = gp.buttons[btn]?.pressed ?? false;
-    if (down && !gpPrev[btn]) pressSwing(kind);
-    if (!down && gpPrev[btn]) conn.reducers.swingRelease({});
-    if (down) padUsedAt = performance.now();
-    gpPrev[btn] = down;
+  if (!gp) {
+    padSprint = false;
+    return null;
   }
+  const edge = (i: number) => {
+    const down = gp.buttons[i]?.pressed ?? false;
+    const was = gpPrev[i] ?? false;
+    gpPrev[i] = down;
+    if (down) padUsedAt = performance.now();
+    return { down, pressed: down && !was, released: !down && was };
+  };
+  for (const [btn, kind] of [[GP_KICK, KICK_NORMAL], [GP_CHIP, KICK_CHIP]] as const) {
+    const e = edge(btn);
+    if (e.pressed) pressKick(kind);
+    if (e.released) conn.reducers.kickRelease({});
+  }
+  if (edge(GP_SLIDE).pressed) conn.reducers.tackle({});
+  padSprint = edge(GP_SPRINT).down || (gp.buttons[GP_SPRINT]?.value ?? 0) > 0.4;
   const ax = gp.axes[0] ?? 0;
   const ay = gp.axes[1] ?? 0;
   if (Math.hypot(ax, ay) < 0.35) return [0, 0];
@@ -1629,13 +1606,13 @@ function pollGamepad(): [number, number] | null {
   return [dx, dy];
 }
 
-function sendDir(dx: number, dy: number) {
+function sendInput(dx: number, dy: number, sprint: boolean) {
   const flip = currentFlip();
   const dirX = Math.sign(dx) * flip;
   const dirY = Math.sign(dy) * flip;
-  if (dirX !== lastSent.dirX || dirY !== lastSent.dirY) {
-    lastSent = { dirX, dirY };
-    conn.reducers.setInput({ dirX, dirY });
+  if (dirX !== lastSent.dirX || dirY !== lastSent.dirY || sprint !== lastSent.sprint) {
+    lastSent = { dirX, dirY, sprint };
+    conn.reducers.setInput({ dirX, dirY, sprint });
   }
 }
 
@@ -1688,7 +1665,7 @@ const GFX_ROWS: {
   { key: 'antialias', name: 'ANTI-ALIASING', hint: 'smooth edges (MSAA)', opts: ON_OFF },
   { key: 'particles', name: 'PARTICLES', hint: 'impact sparks and dust', opts: ON_OFF },
   { key: 'trail', name: 'BALL TRAIL', hint: 'motion trail behind the ball', opts: ON_OFF },
-  { key: 'detail', name: 'CROWD & DETAIL', hint: 'crowd stands, umpire chair, court grain', opts: ON_OFF },
+  { key: 'detail', name: 'CROWD & DETAIL', hint: 'crowd stands, dugouts, pitch mow lines', opts: ON_OFF },
   { key: 'grade', name: 'FILM GRADE', hint: 'tone mapping and color wash', opts: ON_OFF },
   { key: 'vhs', name: 'VHS FILTER', hint: 'retro scanlines, flicker and tracking band', opts: ON_OFF },
   {
@@ -1716,7 +1693,7 @@ const VOL_OPTS: GfxOption[] = [
 ];
 const AUDIO_ROWS: { key: keyof AudioSettings; name: string; hint: string }[] = [
   { key: 'master', name: 'MASTER VOLUME', hint: 'everything — OFF mutes (or press M)' },
-  { key: 'sfx', name: 'GAME SFX', hint: 'hits, bounces, jingles' },
+  { key: 'sfx', name: 'GAME SFX', hint: 'kicks, bounces, whistles' },
   { key: 'crowd', name: 'CROWD', hint: 'stadium ambience and reactions' },
 ];
 
@@ -1726,7 +1703,7 @@ function gfxOptButton(label: string, pick: () => void): HTMLButtonElement {
   btn.textContent = label;
   btn.addEventListener('click', () => {
     pick();
-    btn.blur(); // Space is the swing key — never leave a button focused
+    btn.blur(); // Space is the kick key — never leave a button focused
   });
   return btn;
 }
@@ -1797,7 +1774,7 @@ function buildGfxPanel() {
         // audible feedback at the new level: the crowd row auditions the
         // crowd, everything else a soft SFX blip
         if (row.key === 'crowd') crowdCheer(0.5);
-        else playToss();
+        else playBlip();
       });
       btn.dataset.akey = row.key;
       btn.dataset.value = String(opt.value);
@@ -1867,11 +1844,15 @@ function trackFps(now: number) {
 }
 
 initTouch({
-  swing: kind => {
+  kick: kind => {
     unlockAudio();
-    pressSwing(kind);
+    pressKick(kind);
   },
-  swingRelease: () => conn.reducers.swingRelease({}),
+  kickRelease: () => conn.reducers.kickRelease({}),
+  tackle: () => {
+    unlockAudio();
+    conn.reducers.tackle({});
+  },
   chat: () => {
     const me = getMyPlayer();
     if (me && me.lobbyId !== 0n && !chatOpen) openChat();
@@ -1886,12 +1867,18 @@ window.addEventListener('keydown', e => {
   if (MOVE_KEYS[e.code]) {
     e.preventDefault();
     pressed.add(e.code);
-  } else if (HIT_KEYS.has(e.code)) {
+  } else if (KICK_KEYS.has(e.code)) {
     e.preventDefault();
-    if (!e.repeat) pressSwing(0);
-  } else if (LOB_KEYS.has(e.code)) {
+    if (!e.repeat) pressKick(KICK_NORMAL);
+  } else if (CHIP_KEYS.has(e.code)) {
     e.preventDefault();
-    if (!e.repeat) pressSwing(1);
+    if (!e.repeat) pressKick(KICK_CHIP);
+  } else if (SLIDE_KEYS.has(e.code)) {
+    e.preventDefault();
+    if (!e.repeat) conn.reducers.tackle({});
+  } else if (SPRINT_KEYS.has(e.code)) {
+    e.preventDefault();
+    pressed.add(e.code); // held modifier — the frame loop reads it
   } else if (e.code === 'KeyF' && !e.repeat) {
     toggleFullscreen();
   } else if (e.code === 'KeyG' && !e.repeat) {
@@ -1911,7 +1898,7 @@ window.addEventListener('keydown', e => {
       closeMatchMenu();
     } else if (inLiveMatch()) {
       // In a live match ESC is the match menu — the only route to forfeit,
-      // so it can never be hit by accident mid-rally.
+      // so it can never be hit by accident mid-move.
       openMatchMenu();
     } else {
       showGfxPanel(!gfxPanelOpen());
@@ -1919,8 +1906,8 @@ window.addEventListener('keydown', e => {
   } else if (e.code === 'KeyB' && !e.repeat) {
     bracketView = !bracketView;
   } else if (e.code === 'KeyN' && !e.repeat) {
-    // watching a room with several live courts: flip to the next one. Idle
-    // tournament entrants get the same court hopping as menu watchers.
+    // watching a room with several live pitches: flip to the next one. Idle
+    // tournament entrants get the same pitch hopping as menu watchers.
     const me = getMyPlayer();
     if (me && me.lobbyId !== 0n && me.matchId === 0n) {
       const live = lobbyMatchList(me.lobbyId).filter(m => m.state === M_LIVE);
@@ -1947,27 +1934,34 @@ window.addEventListener('keydown', e => {
   }
 });
 window.addEventListener('keyup', e => {
-  if (MOVE_KEYS[e.code]) pressed.delete(e.code);
-  else if (HIT_KEYS.has(e.code) || LOB_KEYS.has(e.code)) {
-    conn.reducers.swingRelease({});
+  if (MOVE_KEYS[e.code] || SPRINT_KEYS.has(e.code)) pressed.delete(e.code);
+  else if (KICK_KEYS.has(e.code) || CHIP_KEYS.has(e.code)) {
+    conn.reducers.kickRelease({});
   }
 });
+
+/** Is a sprint modifier down on any device? */
+function sprintHeld(): boolean {
+  for (const key of SPRINT_KEYS) if (pressed.has(key)) return true;
+  return padSprint || touchSprint();
+}
 window.addEventListener('blur', () => pressed.clear());
 
 // ---------------------------------------------------------------------------
-// HUD: score plates
+// HUD: score plates, match clock, stamina / kick-power meters
 // ---------------------------------------------------------------------------
-const POINT_NAMES = ['0', '15', '30', '40'];
+const HALF_NAMES = ['1ST HALF', '2ND HALF', 'GOLDEN GOAL'];
+const clockEl = $('matchclock');
 
-function pointStrings(match: any): [string, string] {
-  if (match.p0Points >= 3 && match.p1Points >= 3) {
-    if (match.p0Points === match.p1Points) return ['40', '40'];
-    return match.p0Points > match.p1Points ? ['AD', '-'] : ['-', 'AD'];
-  }
-  return [
-    POINT_NAMES[Math.min(3, match.p0Points)],
-    POINT_NAMES[Math.min(3, match.p1Points)],
-  ];
+/** 1ST HALF / 2ND HALF / GOLDEN GOAL. */
+function halfLabel(match: any): string {
+  return HALF_NAMES[Math.min(HALF_NAMES.length - 1, Math.max(0, (match.half ?? 1) - 1))];
+}
+
+/** mm:ss left in the current half. Golden goal runs on past 0 as sudden death. */
+function clockText(match: any): string {
+  const secs = Math.ceil((match.clockTicks ?? 0) / TICK_HZ);
+  return fmtClock(secs);
 }
 
 const prevPlateScore = ['', ''];
@@ -1982,203 +1976,164 @@ function rollScore(el: HTMLElement, text: string) {
   el.classList.add('roll');
 }
 
-// Doubles: the side's players sorted by seat, and the "A & B" scoreboard label
-// (both mirror the server's naming in spacetimedb/src/index.ts).
+// Team play: the side's players sorted by seat, and the "A & B" scoreboard
+// label (both mirror the server's naming in spacetimedb/src/index.ts).
+// Keepers are bots the server spawns per match — they never carry the label.
 function sidePlayers(players: any[], side: number): any[] {
   return players
-    .filter(p => p.side === side)
+    .filter(p => p.side === side && (p.role ?? 0) !== ROLE_KEEPER)
     .sort((a, b) => (a.teamSlot ?? 0) - (b.teamSlot ?? 0));
 }
 function sideLabel(players: any[], side: number): string {
   return (
     sidePlayers(players, side)
       .map(p => p.name || 'PLAYER')
-      .join(' & ') || `PLAYER ${side + 1}`
+      .join(' & ') || `TEAM ${side + 1}`
   );
 }
-// Which seat of the serving team serves this game (server's rotation rule —
-// games never reset now, so the running game count is the whole rotation).
-function servingSlotOf(match: any, teamSize: number): number {
-  const served = Math.floor(((match.p0Games ?? 0) + (match.p1Games ?? 0)) / 2);
-  return served % Math.max(1, teamSize);
-}
 
-function updatePlates(match: any, players: any[], ruleset = RULES_TENNIS, targets: any[] = []) {
-  const pts = pointStrings(match);
+// Full kick charge, in ticks — mirrors KICK_CHARGE_TICKS in the module.
+const KICK_CHARGE_TICKS = KICK_CHARGE_SECS * TICK_HZ;
+
+function updatePlates(match: any, players: any[], mySide: number) {
   for (const side of [0, 1] as const) {
     const plate = plates[side];
     const team = sidePlayers(players, side);
-    // doubles: the plate's meter tracks ME when I'm on this side, else seat 0
+    // team play: the plate's meters track ME when I'm on this side, else seat 0
     const player = team.find(p => p.identity.toHexString() === myHex()) ?? team[0];
-    let games = String(side === 0 ? match.p0Games : match.p1Games);
-    let points = pts[side];
-    let name = sideLabel(players, side);
-    if (ruleset === RULES_BEERPONG) {
-      // big number = your cups still standing; text = cups you've sunk
-      games = String(targets.filter(t => t.side === side && t.alive).length);
-      points = `CUPS · ${side === 0 ? match.p0Points : match.p1Points} SUNK`;
-    } else if (ruleset === RULES_TARGETS) {
-      if (side === 0) {
-        games = String(match.p0Points);
-        points = 'TARGETS HIT';
-      } else {
-        name = 'BALL MACHINE';
-        games = String(Math.max(0, TARGET_BALLS - match.p1Points));
-        points = 'BALLS LEFT';
-      }
-    }
-    plate.querySelector('.pname')!.textContent = name;
-    rollScore(plate.querySelector('.pgames') as HTMLElement, games);
-    rollScore(plate.querySelector('.ppoints') as HTMLElement, points);
+    const goals = String(side === 0 ? match.p0Goals : match.p1Goals);
+    plate.querySelector('.pname')!.textContent = sideLabel(players, side);
+    rollScore(plate.querySelector('.pgames') as HTMLElement, goals);
+    // the kickoff side is the one restarting play — same convention the
+    // kick-off dot carries
     plate.querySelector('.pserve')!.textContent =
-      match.servingSide === side && ruleset !== RULES_TARGETS
-        ? ruleset === RULES_BEERPONG ? '● THROW' : '● SERVE'
-        : '';
+      match.phase === PHASE_KICKOFF && match.kickoffSide === side ? '● KICK OFF' : '';
+    plate.querySelector('.ppoints')!.textContent = '';
+
+    // Stamina under the nameplate; the kick-power charge draws over it.
     const fill = plate.querySelector('.pmeter-fill') as HTMLElement;
-    const mom = (player?.momentum ?? 0) / 10;
-    fill.style.width = `${mom}%`;
-    fill.classList.toggle('full', mom >= 90);
-    const scoreKey = `${games}|${pts[side]}`;
-    if (prevPlateScore[side] && prevPlateScore[side] !== scoreKey) {
+    const mine = side === mySide;
+    const stamina = mine ? (player?.stamina ?? STAMINA_MAX) / STAMINA_MAX : 0;
+    fill.style.width = `${Math.max(0, Math.min(1, stamina)) * 100}%`;
+    fill.classList.toggle('low', mine && stamina < 0.3);
+    const charge = plate.querySelector('.pcharge-fill') as HTMLElement;
+    const charging = mine && !!player?.kickHeld;
+    const power = charging
+      ? Math.max(0, Math.min(1, (player.kickTicks ?? 0) / KICK_CHARGE_TICKS))
+      : 0;
+    charge.style.width = `${power * 100}%`;
+
+    if (prevPlateScore[side] && prevPlateScore[side] !== goals) {
       plate.classList.remove('bump');
       void (plate as HTMLElement).offsetWidth;
       plate.classList.add('bump');
     }
-    prevPlateScore[side] = scoreKey;
+    prevPlateScore[side] = goals;
   }
 }
 
-// Point-over tally card: the replay letterbox covers the top plates, so a
-// broadcast lower third carries the score while the point result shows.
-function updatePointCard(match: any, players: any[], ruleset: number) {
-  const show = match.phase === PHASE_POINT_OVER && ruleset === RULES_TENNIS;
+let prevClockKey = '';
+
+function updateClock(match: any) {
+  const secs = Math.ceil((match.clockTicks ?? 0) / TICK_HZ);
+  const key = `${secs}|${match.half}`;
+  if (key === prevClockKey) return;
+  prevClockKey = key;
+  $('mc-time').textContent = fmtClock(secs);
+  $('mc-half').textContent = halfLabel(match);
+  // the last half-minute of a half gets the red treatment
+  clockEl.classList.toggle('urgent', secs <= 30 && match.phase === PHASE_LIVE);
+}
+
+// Goal / restart card: the replay letterbox covers the top plates, so a
+// broadcast lower third carries the score while the pause runs.
+function updatePointCard(match: any, players: any[], goals: any[]) {
+  const show = match.phase === PHASE_PAUSE;
   stageEl.classList.toggle('pcard', show);
   if (!show) return;
-  const msg: string = match.pointMsg ?? '';
-  const gameWin = msg.startsWith('GAME ');
-  let winSide = -1;
-  for (const side of [0, 1]) {
-    const label = sideLabel(players, side);
-    if ((gameWin && msg === `GAME ${label}`) || msg.endsWith(`point ${label}`)) {
-      winSide = side;
-    }
-  }
-  const winnerName = winSide >= 0 ? sideLabel(players, winSide) : '';
-  $('pc-tag').textContent = winnerName
-    ? `${gameWin ? '🏆 GAME' : '● POINT'} — ${winnerName}`
-    : '● SCORE';
-  const pts = pointStrings(match);
+  const last = goals.length ? goals[goals.length - 1] : null;
+  const scoredSide = last && match.pauseTicks > 0 ? last.side : -1;
+  $('pc-tag').textContent = last && scoredSide >= 0
+    ? `${last.ownGoal ? '● OWN GOAL' : '⚽ GOAL'} — ${last.scorerName}`
+    : `● ${halfLabel(match)}`;
   for (const side of [0, 1] as const) {
     const row = $(`pc-row${side}`);
     row.querySelector('.pc-name')!.textContent = sideLabel(players, side);
-    row.querySelector('.pc-games')!.textContent = String(side === 0 ? match.p0Games : match.p1Games);
-    row.querySelector('.pc-pts')!.textContent = pts[side];
-    // the dot marks who serves NEXT — same convention as the top plates
-    row.querySelector('.pc-serve')!.textContent = match.servingSide === side ? '● SERVE' : '';
-    row.classList.toggle('win', winSide === side);
+    row.querySelector('.pc-games')!.textContent = String(
+      side === 0 ? match.p0Goals : match.p1Goals
+    );
+    // the scorers this side has on the sheet, newest last
+    row.querySelector('.pc-pts')!.textContent = goals
+      .filter(g => g.side === side)
+      .map(g => `${g.scorerName} ${g.clockSecs}'`)
+      .slice(-2)
+      .join(' · ');
+    // whoever restarts play next — after a goal that's the side who conceded
+    row.querySelector('.pc-serve')!.textContent =
+      match.kickoffSide === side ? '● KICK OFF' : '';
+    row.classList.toggle('win', scoredSide === side);
   }
 }
 
-let prevPts: [number, number] | null = null;
+let prevGoals: [number, number] | null = null;
 const pointFlashEl = $('point-flash');
-function pointSound(match: any, mySide: number) {
-  const cur: [number, number] = [
-    match.p0Points + match.p0Games * 100,
-    match.p1Points + match.p1Games * 100,
-  ];
-  if (prevPts && (cur[0] !== prevPts[0] || cur[1] !== prevPts[1])) {
-    const iScored = mySide === 0 ? cur[0] > prevPts[0] : cur[1] > prevPts[1];
-    playPoint(mySide < 0 ? false : iScored);
-    // rim flash on the point outcome — players only, and a longer pulse
-    // when the point took a whole game (the hundreds digit moved)
+function goalSound(match: any, mySide: number) {
+  const cur: [number, number] = [match.p0Goals, match.p1Goals];
+  if (prevGoals && (cur[0] !== prevGoals[0] || cur[1] !== prevGoals[1])) {
+    const iScored = mySide === 0 ? cur[0] > prevGoals[0] : cur[1] > prevGoals[1];
+    playGoalJingle(mySide < 0 ? false : iScored);
+    // rim flash on the goal — players only
     if (mySide >= 0) {
-      const gameWin =
-        Math.floor(cur[0] / 100) !== Math.floor(prevPts[0] / 100) ||
-        Math.floor(cur[1] / 100) !== Math.floor(prevPts[1] / 100);
       pointFlashEl.className = '';
       void (pointFlashEl as HTMLElement).offsetWidth;
-      pointFlashEl.className = (iScored ? 'win' : 'lose') + (gameWin ? ' big' : '');
+      pointFlashEl.className = (iScored ? 'win' : 'lose') + ' big';
     }
   }
-  prevPts = cur;
+  prevGoals = cur;
 }
 
 // ---------------------------------------------------------------------------
 // Crowd audio: an ambience bed whose hype tracks match state, plus staged
-// reactions keyed off phase transitions (point decided, game, match won).
+// reactions keyed off phase transitions (goal, half-time, full time).
 // ---------------------------------------------------------------------------
 let crowdPrevPhase = -1;
 let crowdPrevMatchId = -1n;
-let crowdRallyHits = 0; // rally length at the moment the point ended
+let crowdPrevGoals = 0;
 
-// Pressure bonus: deuce, game point, match point (tennis rules only).
-function crowdBigPoint(match: any): number {
-  const pts = [match.p0Points, match.p1Points];
-  const games = [match.p0Games, match.p1Games];
-  let bonus = pts[0] >= 3 && pts[1] >= 3 ? 0.15 : 0;
-  for (const s of [0, 1]) {
-    const o = 1 - s;
-    if (pts[s] >= 3 && pts[s] >= pts[o] + 1) {
-      const clinches = games[s] + 1 >= (match.gamesToWin ?? 2);
-      bonus += clinches ? 0.3 : 0.12;
-    }
-  }
-  return Math.min(0.35, bonus);
-}
-
-function crowdFrame(match: any, ball: any, ruleset: number) {
+function crowdFrame(match: any, ball: any) {
+  const totalGoals = (match.p0Goals ?? 0) + (match.p1Goals ?? 0);
   if (match.id !== crowdPrevMatchId) {
     crowdPrevMatchId = match.id;
     // joining mid-match (or spectating): swallow the first transition so a
-    // stale POINT_OVER/GAME_OVER doesn't fire a cheer on entry
+    // stale PAUSE/OVER doesn't fire a roar on entry
     crowdPrevPhase = match.phase;
-    crowdRallyHits = 0;
+    crowdPrevGoals = totalGoals;
   }
-  const rallyHits = ball?.active ? (ball.rallyHits ?? 0) : 0;
-  if (match.phase === PHASE_RALLY && ball?.active) crowdRallyHits = rallyHits;
 
   // ----- reactions on phase transitions -----
   if (match.phase !== crowdPrevPhase) {
-    if (match.phase === PHASE_POINT_OVER || match.phase === PHASE_GAME_OVER) {
-      const msg: string = match.pointMsg ?? '';
-      const rallyBonus = Math.min(0.45, crowdRallyHits * 0.04);
-      if (match.phase === PHASE_GAME_OVER) {
-        if (msg.includes('CLEARS THE CUPS')) playSplash();
-        crowdRoar(); // match decided (or cups cleared / practice done)
-      } else if (msg.startsWith('GAME ')) {
-        crowdCheer(0.75 + rallyBonus * 0.5);
-      } else if (msg.startsWith('SPLASH')) {
-        playSplash();
-        crowdCheer(0.8);
-      } else if (msg.startsWith('TARGET HIT')) {
-        playDing();
-        crowdCheer(0.55);
-      } else if (msg.startsWith('OUT')) {
-        // the gasp at the line call, then the clap for the point
-        crowdOoh(0.8);
-        setTimeout(() => crowdCheer(0.35 + rallyBonus), 400);
-      } else if (msg.startsWith('NET')) {
-        playNetCord();
-        crowdGroan();
-        setTimeout(() => crowdCheer(0.3 + rallyBonus), 450);
-      } else if (msg.startsWith('MISS')) {
-        crowdGroan(); // target practice: a wasted ball
+    if (match.phase === PHASE_OVER) {
+      playWhistle();
+      crowdRoar(); // full time
+    } else if (match.phase === PHASE_PAUSE) {
+      if (totalGoals > crowdPrevGoals) {
+        crowdRoar(); // the renderer plays the horn; the stands do the rest
       } else {
-        crowdCheer(0.45 + rallyBonus);
+        const msg: string = match.pointMsg ?? '';
+        if (msg.startsWith('HALF-TIME')) playWhistle();
+        else crowdMurmur(0.4); // a kick-in, a corner, a goal kick
       }
-      crowdRallyHits = 0;
     }
     crowdPrevPhase = match.phase;
   }
+  crowdPrevGoals = totalGoals;
 
-  // ----- ambience hype: builds the longer the match goes on -----
-  const matchLength =
-    (match.p0Games + match.p1Games) * 0.12 +
-    (match.p0Points + match.p1Points) * 0.02;
-  const rally = match.phase === PHASE_RALLY ? Math.min(0.45, rallyHits * 0.05) : 0;
-  const pressure = ruleset === RULES_TENNIS ? crowdBigPoint(match) : 0;
-  let hype = Math.min(1, 0.15 + matchLength + rally + pressure);
-  if (match.phase === PHASE_SERVE) hype *= 0.45; // the crowd settles for the serve
+  // ----- ambience hype: builds with the goals and with the ball's position -----
+  const attacking = ball ? Math.min(0.4, Math.abs(ball.y) / 100) : 0;
+  const late = match.half >= 2 ? 0.15 : 0;
+  const tight = Math.abs((match.p0Goals ?? 0) - (match.p1Goals ?? 0)) <= 1 ? 0.12 : 0;
+  let hype = Math.min(1, 0.15 + totalGoals * 0.06 + attacking + late + tight);
+  if (match.phase !== PHASE_LIVE) hype *= 0.5; // the crowd settles at a restart
   crowdSetHype(hype);
 }
 
@@ -2194,7 +2149,7 @@ let lastRenderedChatId = -1n;
 let lastBubbleChatId = -1n;
 
 // Head-anchored bubbles: emote pops + speech bubbles pinned above each
-// on-court player's head (repositioned every frame from headScreenPos).
+// on-pitch player's head (repositioned every frame from headScreenPos).
 const headAnnoEls = [$('head-anno-0'), $('head-anno-1')] as HTMLElement[];
 const emotePopEls = [$('emote-pop-0'), $('emote-pop-1')] as HTMLElement[];
 const speechEls = [$('speech-0'), $('speech-1')] as HTMLElement[];
@@ -2330,12 +2285,12 @@ lobbyChatInput.addEventListener('keydown', e => {
   else if (e.key === 'Escape') lobbyChatInput.blur();
 });
 
-// courtSideByName maps an on-court player's name to their match side; when a
-// sender is on court their messages surface as bubbles above their head, and
-// emotes stay out of the feed. Off-court senders (lobby, spectators) fall
+// pitchSideByName maps a player on the pitch to their match side; when a
+// sender is on the pitch their messages surface as bubbles above their head,
+// and emotes stay out of the feed. Off-pitch senders (lobby, spectators) fall
 // back to the corner feed for everything.
-function updateChat(lobbyId: bigint, myName: string, courtSideByName?: Map<string, number>) {
-  if (!courtSideByName) positionHeadAnnos(false); // overlay screens: no heads on court
+function updateChat(lobbyId: bigint, myName: string, pitchSideByName?: Map<string, number>) {
+  if (!pitchSideByName) positionHeadAnnos(false); // overlay screens: nobody on the pitch
   const rows = [] as any[];
   for (const m of conn.db.chat.iter()) if (m.lobbyId === lobbyId) rows.push(m);
   rows.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
@@ -2356,7 +2311,7 @@ function updateChat(lobbyId: bigint, myName: string, courtSideByName?: Map<strin
     };
     chatFeed.innerHTML = '';
     for (const m of recent) {
-      if (m.emote && courtSideByName?.has(m.senderName)) continue;
+      if (m.emote && pitchSideByName?.has(m.senderName)) continue;
       chatFeed.appendChild(chatLine(m));
     }
     // the lobby's chat box shows a longer scrollback, pinned to the newest
@@ -2366,7 +2321,7 @@ function updateChat(lobbyId: bigint, myName: string, courtSideByName?: Map<strin
     for (const m of recent) {
       if (m.id <= lastBubbleChatId) continue;
       lastBubbleChatId = m.id;
-      const side = courtSideByName?.get(m.senderName);
+      const side = pitchSideByName?.get(m.senderName);
       if (side === undefined) continue;
       if (m.emote) {
         popBubble(emotePopEls[side], m.text, 2300);
@@ -2376,7 +2331,7 @@ function updateChat(lobbyId: bigint, myName: string, courtSideByName?: Map<strin
   }
 }
 
-// hit-quality toasts, fired by the renderer's contact events
+// strike-quality toasts, fired by the renderer's contact events
 const toastEl = $('toast');
 
 function showToast(text: string, color: string) {
@@ -2390,33 +2345,13 @@ function showToast(text: string, color: string) {
 window.addEventListener('dt-hit', e => {
   const detail = (e as CustomEvent).detail ?? {};
   const power = detail.power ?? 0;
-  if (detail.screw) {
-    // white-out flash on the finisher launch
-    stageEl.classList.remove('boom');
-    void (stageEl as HTMLElement).offsetWidth;
-    stageEl.classList.add('boom');
-  }
-  // crowd reads the contact too: gasp at a finisher, buzz for clean strikes
-  if (detail.screw) crowdOoh(1);
-  else if (power > 0.82) crowdMurmur(0.7);
+  // the crowd reads the contact too: a buzz for anything struck cleanly
+  if (power > 0.82) crowdMurmur(0.7);
   else if (power > 0.68) crowdMurmur(0.35);
-  const text = detail.screw
-    ? 'SCREW SHOT!!'
-    : power > 0.82 ? 'PERFECT!' : power > 0.68 ? 'NICE!' : '';
+  const text = power > 0.9 ? 'THUNDERBOLT!' : power > 0.82 ? 'GREAT STRIKE!' : '';
   if (!text) return;
-  showToast(text, detail.screw ? '#c060ff' : power > 0.82 ? '#ffd400' : '#8cf08c');
+  showToast(text, power > 0.9 ? '#ffd400' : '#8cf08c');
 });
-
-// full-meter callout: tell the player the finisher combo is armed
-let prevMyMomentum = 0;
-function momentumCallout(me: any, inMatch: boolean) {
-  const mom = inMatch ? (me?.momentum ?? 0) : 0;
-  if (mom >= MOMENTUM_MAX && prevMyMomentum < MOMENTUM_MAX) {
-    showToast('FINISHER READY — HIT+LOB!', '#c060ff');
-    playCharge();
-  }
-  prevMyMomentum = mom;
-}
 
 let prevBannerText = '';
 function setBanner(text: string) {
@@ -2432,8 +2367,11 @@ function setBanner(text: string) {
 }
 
 // ---------------------------------------------------------------------------
-// Point replay
+// Goal / restart replay
 // ---------------------------------------------------------------------------
+// Play stops on a goal or a ball out of play, and the pause is long enough to
+// show it back: the last couple of seconds of live play, slowed down, on the
+// broadcast cam.
 const replayBuf: { t: number; scene: Scene }[] = [];
 let replayFrames: { t: number; scene: Scene }[] = [];
 let replayActive = false;
@@ -2441,169 +2379,23 @@ let replayStart = 0;
 let replayIdx = 0;
 let prevPhaseMain = -1;
 let replayMatchId = 0n;
-const REPLAY_WINDOW_MS = 2000;
-const REPLAY_SPEED = 0.6;
-// once playback catches up with the landing: a VAR replay cuts to the
-// Hawk-Eye overhead verdict shot and holds it so the line call is readable, a
-// plain replay just rests on the landing for a beat before cutting back to live
-const REPLAY_HOLD_MS = 2600;
-const REPLAY_TAIL_MS = 600;
+const REPLAY_WINDOW_MS = 2600;
+const REPLAY_SPEED = 0.55;
+// once playback catches up: rest on the finish for a beat, then cut to live
+const REPLAY_TAIL_MS = 700;
 let replayHoldAt = 0;
 let replayEndScene: Scene | null = null;
-// The point ends on the very frame the ball comes down, so the line call, the
-// crowd's gasp and the cut to the replay cam would all hit in the same instant
-// — a jarring snap right as you're reading where the ball landed. Hold the
-// live cam on the landing for a beat first (the ball resting where it pitched,
-// the call up on the banner), THEN cut to the broadcast replay.
-const REPLAY_CUT_DELAY_MS = 400;
+// Play stops on the very frame the ball crosses the line, so the goal, the
+// crowd's roar and the cut to the replay cam would all land in the same
+// instant. Hold the live cam on the celebration for a beat first.
+const REPLAY_CUT_DELAY_MS = 500;
 let replayPendingAt = 0; // >0 while that beat runs; the cut is due at this time
-
-// VAR review data, computed once when a replay starts: the final shot's full
-// flight path, where it bounced, and the line call (mirrors the server's
-// in/out judgement in game_tick).
-let varTrailPts: { x: number; y: number; z: number }[] = [];
-let varShotStartIdx = 0; // replayFrames index where the final shot begins
-let varMarkAtIdx = 0; // shot-relative frame index at which the mark appears
-let varMarkInfo: VarReview['mark'] = null;
-let varCall: VarReview['call'] = null;
-let varSub = ''; // verdict card subtitle, e.g. "OUT BY 14 CM"
-let varActive = false; // false = plain broadcast replay, no Hawk-Eye overlay
-const UNIT_CM = 30.5; // world units → cm (regulation half-court ≈ 11.9 m / 39 units)
-// How near the paint the bounce print has to come for VAR to bother reviewing
-// it — measured as the gap you can actually see on screen between the mark and
-// the line. Only a call this tight is worth the Hawk-Eye treatment; a bounce in
-// the middle of the court, a ball comfortably long or one buried in the net is
-// not in doubt, so it gets the normal replay instead.
-const VAR_CLOSE_CM = 15;
-
-// The bounce VAR reviews: where the ball landed, which way it was travelling,
-// and the shot-relative replay frame it lands on.
-type VarBounce = { x: number; y: number; dx: number; dy: number; idx: number };
-
-// First shot frame at or after a wall-clock time (both use performance.now()).
-function shotFrameAt(frames: { t: number }[], at: number): number {
-  for (let i = 0; i < frames.length; i++) if (frames[i].t >= at) return i;
-  return Math.max(0, frames.length - 1);
-}
-
-// Fallback bounce finder for when the server's bounce tick wasn't seen (a
-// spectator who joined mid-rally): the ball falling one frame and coming back
-// up off the court the next. Only a bounce the ball SURVIVED counts — one it
-// died on ends the point right there, leaving the resting row as the exact
-// landing, so there is nothing better to find.
-function scanFirstBounce(frames: { scene: Scene }[]): VarBounce | null {
-  for (let i = 1; i < frames.length; i++) {
-    const b0 = frames[i - 1].scene.ball;
-    const b1 = frames[i].scene.ball;
-    if (!b0 || !b1 || b0.vz >= 0 || b1.z >= 2) continue; // not falling in near the floor
-    if (b1.vz < 0 && b1.z > 0) continue; // still on the way down
-    const flewAgain = frames.slice(i + 1).some(f => (f.scene.ball?.z ?? 0) > 1.5);
-    if (flewAgain) return { x: b1.x, y: b1.y, dx: b1.vx, dy: b1.vy, idx: i };
-  }
-  return null;
-}
-
-function resetVarReview() {
-  varTrailPts = [];
-  varMarkInfo = null;
-  varCall = null;
-  varSub = '';
-  varActive = false;
-  stageEl.classList.remove('var-live');
-}
-
-// Verdict card (Hawk-Eye style IN/OUT panel) — shown during the overhead hold
-function showVarCard() {
-  if (!varCall) return;
-  const card = $('var-verdict');
-  card.classList.remove('in', 'out', 'net');
-  card.classList.add(varCall.toLowerCase());
-  $('var-call').textContent = varCall;
-  const sub = $('var-sub');
-  sub.textContent = varSub;
-  sub.style.display = varSub ? '' : 'none';
-  stageEl.classList.add('var-live');
-}
-
-// ---------------------------------------------------------------------------
-// SUPER FINISHER cinematic: slow-mo on the normal game cam
-// ---------------------------------------------------------------------------
-// When a screw-shot finisher arms (or its launch is spotted live), the match
-// view drops into slow-motion playback of the rally buffer, holds the
-// flaming launch, then fast-forwards back to live — no camera cuts, so play
-// stays readable throughout. It's pure presentation — inputs and simulation
-// stay real-time. The DEFENDER gets a much tighter cut so their view is back
-// on real time well before the screw shot reaches their side.
-let cineActive = false;
-let cineCatch = false; // false = slow-mo, true = fast-forward back to live
-let cinePlayhead = 0;
-let cineStartAt = 0;
-let cineStriker = 0;
-let cineLaunchSeenAt = 0;
-let cineSlow = 0.28;
-let cineCatchRate = 3.0;
-let cineMaxSlowMs = 950;
-let cineHoldMs = 220;
-let prevLiveSpin = 0;
-let localSuperAt = -1e9; // when I fired the HIT+LOB combo (pre-server-roundtrip)
-const CINE_REWIND_MS = 220; // launches spotted live replay the contact from here
-
-function startCine(now: number, striker: number, playhead: number, defending: boolean) {
-  cineActive = true;
-  cineCatch = false;
-  cineStriker = striker;
-  cinePlayhead = playhead;
-  cineStartAt = now;
-  cineLaunchSeenAt = 0;
-  if (defending) {
-    cineSlow = 0.45; cineCatchRate = 3.6; cineMaxSlowMs = 380; cineHoldMs = 90;
-  } else {
-    // every buildup rolls its own pace
-    cineSlow = 0.22 + Math.random() * 0.14;
-    cineCatchRate = 3.0; cineMaxSlowMs = 950; cineHoldMs = 220;
-  }
-  stageEl.classList.add('cine');
-}
-
-function endCine() {
-  cineActive = false;
-  stageEl.classList.remove('cine');
-}
 
 // ---------------------------------------------------------------------------
 // Match-start 3-2-1 countdown
 // ---------------------------------------------------------------------------
 const countdownEl = $('countdown');
 let prevCountdown = 0;
-
-// ---------------------------------------------------------------------------
-// Broadcast serve-speed chip: the serve strike is the tick where the match
-// flips PHASE_SERVE → PHASE_RALLY, so the ball row still carries the launch
-// velocity — read it once and show it as km/h (UNIT_CM converts world units).
-// ---------------------------------------------------------------------------
-const serveSpeedEl = $('serve-speed');
-let ssPrevPhase = -1;
-let ssPrevMatchId = -1n;
-
-function serveSpeedChip(match: any, ball: any, ruleset: number) {
-  if (match.id !== ssPrevMatchId) {
-    ssPrevMatchId = match.id;
-    ssPrevPhase = -1;
-  }
-  if (
-    ssPrevPhase === PHASE_SERVE && match.phase === PHASE_RALLY &&
-    ruleset === RULES_TENNIS && ball?.active
-  ) {
-    const kmh = Math.round((Math.hypot(ball.vx, ball.vy, ball.vz) * UNIT_CM * 3.6) / 100);
-    if (kmh > 20) {
-      $('ss-val').textContent = `${kmh} KM/H`;
-      serveSpeedEl.classList.remove('show');
-      void (serveSpeedEl as HTMLElement).offsetWidth;
-      serveSpeedEl.classList.add('show');
-    }
-  }
-  ssPrevPhase = match.phase;
-}
 
 // ---------------------------------------------------------------------------
 // Tournament: my finished match shows a result screen until I hit CONTINUE
@@ -2615,9 +2407,11 @@ let tourneyResultSeen = '';
 // Waiting / registration overlay
 // ---------------------------------------------------------------------------
 // mirror spacetimedb/src/index.ts
-const QUICK_GAMES_TO_WIN = 2; // games that take the match — no 2-game margin
-const TOURNEY_GAMES_TO_WIN = 2;
 const MAX_TOURNAMENT_PLAYERS = 16;
+// Match format blurb: two halves, then golden goal if it's still level.
+const MATCH_FORMAT_TEXT =
+  `2 × ${Math.round(HALF_SECONDS / 60)} MIN HALVES · ` +
+  `GOLDEN GOAL (${Math.round(OT_SECONDS / 60)} MIN) IF LEVEL`;
 
 let lastInfoKey = '';
 let lastRosterKey = '';
@@ -2630,49 +2424,31 @@ function playerByIdentity(id: any): any | null {
   return null;
 }
 
-// hostControls: the host's FORMAT/COURTS switches are on screen, so skip the
+// hostControls: the host's FORMAT/PITCHES switches are on screen, so skip the
 // pills that would repeat them right above.
 function updateLobbyInfo(room: any, running: boolean, hostControls = false) {
   const isTournament = room.mode === MODE_TOURNAMENT;
-  const ruleset = room.ruleset ?? RULES_TENNIS;
-  const court = COURTS[room.court ?? 0];
+  const pitch = PITCHES[room.pitch ?? 0];
   const pills: [string, string][] = [
-    ['COURT', court ? `${court.name} · ${court.desc}` : '?'],
+    ['PITCH', pitch ? `${pitch.name} · ${pitch.desc}` : '?'],
   ];
-  if (ruleset === RULES_BEERPONG) {
-    pills.push(
-      ['MODE', '🍺 BEER PONG'],
-      ['MATCH', `ALTERNATE THROWS · SINK ALL ${CUPS_PER_SIDE} CUPS`]
-    );
-  } else if (ruleset === RULES_TARGETS) {
-    pills.push(['MODE', '🎯 TARGET PRACTICE'], ['MATCH', `${TARGET_BALLS} BALLS`]);
-  } else {
-    const ts = room.teamSize ?? 1;
-    if (ts > 1) {
-      pills.push(['MODE', `👥 ${ts}V${ts} ${ts === 2 ? 'DOUBLES' : 'TRIPLES'}`]);
-    }
-    pills.push([
-      'MATCH',
-      `BEST OF ${bestOf(
-        isTournament ? TOURNEY_GAMES_TO_WIN : QUICK_GAMES_TO_WIN
-      )} GAMES · FIRST TO ${
-        isTournament ? TOURNEY_GAMES_TO_WIN : QUICK_GAMES_TO_WIN
-      } TAKES IT`,
-    ]);
-  }
+  const ts = room.teamSize ?? 1;
+  if (ts > 1) pills.push(['MODE', `👥 ${ts}V${ts}`]);
+  pills.push(['MATCH', MATCH_FORMAT_TEXT]);
   if (room.vsBot) {
     pills.push(['BOT', BOT_LEVEL_CARDS[room.botLevel ?? 1]?.name ?? 'NORMAL']);
   }
   const physBits: string[] = [];
-  if (Math.abs((room.gravityMul ?? 1) - 1) > 0.01) physBits.push(`WEIGHT ${Math.round(room.gravityMul * 100)}%`);
-  if ((room.dragMul ?? 0) > 0.01) physBits.push(`DRAG ${Math.round(room.dragMul * 100)}%`);
-  if (Math.abs((room.speedMul ?? 1) - 1) > 0.01) physBits.push(`POWER ${Math.round(room.speedMul * 100)}%`);
-  if (Math.abs((room.bounceMul ?? 1) - 1) > 0.01) physBits.push(`BOUNCE ${Math.round(room.bounceMul * 100)}%`);
+  const pct = (v: number) => `${Math.round(v * 100)}%`;
+  if (Math.abs((room.gravityMul ?? 1) - 1) > 0.01) physBits.push(`BALL WEIGHT ${pct(room.gravityMul)}`);
+  if (Math.abs((room.frictionMul ?? 1) - 1) > 0.01) physBits.push(`FRICTION ${pct(room.frictionMul)}`);
+  if (Math.abs((room.powerMul ?? 1) - 1) > 0.01) physBits.push(`KICK POWER ${pct(room.powerMul)}`);
+  if (Math.abs((room.bounceMul ?? 1) - 1) > 0.01) physBits.push(`BOUNCE ${pct(room.bounceMul)}`);
   if (physBits.length) pills.push(['PHYSICS', physBits.join(' · ')]);
   if (isTournament && !hostControls) {
     pills.push(['FORMAT', FORMAT_NAMES[room.format ?? 0] ?? FORMAT_NAMES[0]]);
     if ((room.concurrent ?? 1) > 1) {
-      pills.push(['COURTS', `${room.concurrent} MATCHES AT ONCE`]);
+      pills.push(['PITCHES', `${room.concurrent} MATCHES AT ONCE`]);
     }
   }
   const key = pills.map(p => p.join('=')).join('|') + (running ? '#r' : '');
@@ -2695,12 +2471,12 @@ function updateLobbyInfo(room: any, running: boolean, hostControls = false) {
 
 function updateRoster(room: any, me: any, players: any[]) {
   const isTournament = room.mode === MODE_TOURNAMENT;
-  const doubles = !isTournament && (room.teamSize ?? 1) >= 2;
+  const teams = !isTournament && (room.teamSize ?? 1) >= 2;
   const capacity = isTournament ? MAX_TOURNAMENT_PLAYERS : (room.teamSize ?? 1) * 2;
   const hostHex = room.hostId.toHexString();
   const sorted = [...players].sort((a, b) => {
-    // doubles: group by team so the 2v2 pairing reads at a glance
-    if (doubles && a.side !== b.side) return a.side - b.side;
+    // team play: group by side so the 2v2 pairing reads at a glance
+    if (teams && a.side !== b.side) return a.side - b.side;
     const ah = a.identity.toHexString() === hostHex ? 0 : 1;
     const bh = b.identity.toHexString() === hostHex ? 0 : 1;
     return ah - bh || (a.name || '').localeCompare(b.name || '');
@@ -2717,7 +2493,7 @@ function updateRoster(room: any, me: any, players: any[]) {
   $('roster-head').textContent = isTournament
     ? `PLAYERS ${players.length}/${MAX_TOURNAMENT_PLAYERS}` +
       (tourneyTs > 1 ? ` · TEAMS OF ${tourneyTs}` : '')
-    : doubles
+    : teams
       ? `PLAYERS ${players.length}/${capacity}`
       : 'PLAYERS';
   const list = $('waiting-players');
@@ -2733,7 +2509,7 @@ function updateRoster(room: any, me: any, players: any[]) {
     name.textContent = `${ch?.flag ?? ''} ${p.name || 'PLAYER'}${p.identity.toHexString() === myHex() ? ' (YOU)' : ''}`;
     const charLine = document.createElement('span');
     charLine.className = 'chip-char';
-    const teamBit = doubles ? `TEAM ${(p.side ?? 0) + 1} · ` : '';
+    const teamBit = teams ? `TEAM ${(p.side ?? 0) + 1} · ` : '';
     // Size up who you're playing: rating sits with the character line.
     const rating = mmrOf(p);
     const ratingBit = rating === null ? '' : ` · ${rating} MMR`;
@@ -2746,7 +2522,7 @@ function updateRoster(room: any, me: any, players: any[]) {
     slot.className = 'player-chip open-slot';
     slot.textContent = isTournament
       ? '+ OPEN SLOT'
-      : doubles
+      : teams
         ? `WAITING FOR ${capacity - players.length} MORE…`
         : 'WAITING FOR OPPONENT…';
     list.appendChild(slot);
@@ -2833,7 +2609,7 @@ function buildMatchCard(m: any, nameOf: (id: any) => string): HTMLElement {
       bscore.textContent = '—';
     } else {
       bname.textContent = nameOf(id);
-      bscore.textContent = String(side === 0 ? m.p0Games : m.p1Games);
+      bscore.textContent = String(side === 0 ? m.p0Goals : m.p1Goals);
       if (m.state === M_DONE && (m.winnerSide === side || !m.hasP1)) {
         row.classList.add('winner');
       }
@@ -2906,7 +2682,7 @@ function updateBracket(room: any) {
     matches
       .map(
         m =>
-          `${m.id}:${m.state}:${m.p0Games}:${m.p1Games}:${m.winnerSide}:${nameOf(m.p0Id)}:${m.hasP1 ? nameOf(m.p1Id) : ''}`
+          `${m.id}:${m.state}:${m.p0Goals}:${m.p1Goals}:${m.winnerSide}:${nameOf(m.p0Id)}:${m.hasP1 ? nameOf(m.p1Id) : ''}`
       )
       .join('|') + `#${myHex()}`;
   if (key === lastBracketKey) return;
@@ -3119,12 +2895,12 @@ function updateTourneyFeed(room: any) {
     }
     const label = matchLabel(m, matches);
     if (m.state === M_LIVE) {
-      pushTourneyUpdate('🎾', `${label} — ${nameOf(m.p0Id)} VS ${nameOf(m.p1Id)} · LIVE NOW`, 'live');
+      pushTourneyUpdate('⚽', `${label} — ${nameOf(m.p0Id)} VS ${nameOf(m.p1Id)} · KICKING OFF`, 'live');
     } else if (m.state === M_DONE) {
       const wId = m.winnerSide === 0 ? m.p0Id : m.p1Id;
       const lId = m.winnerSide === 0 ? m.p1Id : m.p0Id;
-      const wg = m.winnerSide === 0 ? m.p0Games : m.p1Games;
-      const lg = m.winnerSide === 0 ? m.p1Games : m.p0Games;
+      const wg = m.winnerSide === 0 ? m.p0Goals : m.p1Goals;
+      const lg = m.winnerSide === 0 ? m.p1Goals : m.p0Goals;
       let fate = '';
       if ((room.format ?? 0) === FORMAT_DOUBLE && (m.bracket ?? 0) === 0) {
         fate = ` · ${nameOf(lId)} drops to the losers bracket`;
@@ -3223,7 +2999,7 @@ function maybeShowMatchIntro(room: any, viewMatch: any) {
   if (room.mode !== MODE_TOURNAMENT || viewMatch.state !== M_LIVE || !viewMatch.hasP1) return;
   const key = String(viewMatch.id);
   if (key === introShownFor) return;
-  // only introduce a match during its pre-serve countdown — reloading or
+  // only introduce a match during its pre-kickoff countdown — reloading or
   // tuning in mid-match skips straight to the action
   if ((viewMatch.startTicks ?? 0) <= 0) {
     introShownFor = key; // don't re-check every frame
@@ -3234,9 +3010,7 @@ function maybeShowMatchIntro(room: any, viewMatch: any) {
   clearTimeout(introHideTimer);
   const introBook = bookOf(viewMatch.id);
   $('mi-round').textContent =
-    `${matchLabel(viewMatch, lobbyMatchList(room.id))} · BEST OF ${bestOf(
-      viewMatch.gamesToWin ?? QUICK_GAMES_TO_WIN
-    )} GAMES` +
+    `${matchLabel(viewMatch, lobbyMatchList(room.id))} · ${MATCH_FORMAT_TEXT}` +
     (introBook ? ` · ${fmtOdds(introBook.odds0Milli)} — ${fmtOdds(introBook.odds1Milli)}` : '');
   fillIntroSide($('mi-side0'), room, viewMatch.p0Id);
   fillIntroSide($('mi-side1'), room, viewMatch.p1Id);
@@ -3328,7 +3102,7 @@ function updateHaltOverlay(m: any | null, me: any) {
   claim.textContent = unlockIn > 0 ? `Claim Win (${Math.ceil(unlockIn)}s)` : 'Claim Win';
   $('halt-hint').textContent =
     unlockIn > 0
-      ? 'THE POINT REPLAYS IF THEY MAKE IT BACK'
+      ? 'PLAY RESTARTS WITH A DROP BALL IF THEY MAKE IT BACK'
       : 'YOU WIN AUTOMATICALLY WHEN THE CLOCK RUNS OUT';
 }
 
@@ -3388,7 +3162,7 @@ $('mm-forfeit-yes').addEventListener('click', () => {
 function showMatchSummary(room: any, m: any) {
   const el = $('match-summary');
   el.classList.remove('hidden');
-  const key = `${m.id}:${m.p0Games}:${m.p1Games}:${m.p0Points}:${m.p1Points}`;
+  const key = `${m.id}:${m.p0Goals}:${m.p1Goals}`;
   if (key === summaryShownFor) return;
   summaryShownFor = key;
   el.innerHTML = '';
@@ -3397,8 +3171,8 @@ function showMatchSummary(room: any, m: any) {
   head.textContent = matchLabel(m, lobbyMatchList(room.id));
   el.appendChild(head);
   const solo = (room.teamSize ?? 1) <= 1;
-  ([[m.p0Id, m.p0Games, 0], [m.p1Id, m.p1Games, 1]] as
-    [any, number, number][]).forEach(([id, games, side]) => {
+  ([[m.p0Id, m.p0Goals, 0], [m.p1Id, m.p1Goals, 1]] as
+    [any, number, number][]).forEach(([id, goals, side]) => {
     const cap = playerByIdentity(id);
     const ch = CHARACTERS[cap?.characterId ?? 0];
     const row = document.createElement('div');
@@ -3418,7 +3192,7 @@ function showMatchSummary(room: any, m: any) {
     who.append(name, char);
     const score = document.createElement('span');
     score.className = 'ms-games';
-    score.textContent = String(games);
+    score.textContent = String(goals);
     row.append(who, score);
     el.appendChild(row);
   });
@@ -3432,9 +3206,9 @@ function showMatchSummary(room: any, m: any) {
 let betPick: { matchId: bigint; side: number; stake: number } | null = null;
 
 // Seconds until the book locks — the countdown minus the 3-2-1 in front of
-// the first serve. Pending matches (still waiting for a court) never tick.
+// the kickoff. Pending matches (still waiting for a pitch) never tick.
 function betCloseSecs(m: any): number | null {
-  if (m.state !== M_LIVE || m.phase !== PHASE_SERVE) return null;
+  if (m.state !== M_LIVE || m.phase !== PHASE_KICKOFF) return null;
   const secs = Math.ceil((m.startTicks ?? 0) / TICK_HZ) - COUNTDOWN_SECS;
   return secs > 0 ? secs : 0;
 }
@@ -3638,13 +3412,13 @@ function renderBetPanel(room: any, me: any) {
   note.textContent = !books.length
     ? 'NO OPEN MARKETS — THE NEXT ROUND OPENS ITS BOOKS WHEN IT IS DRAWN'
     : me.matchId !== 0n
-      ? "YOU'RE ON COURT — THE BOOK IS READ-ONLY WHILE YOU PLAY"
+      ? "YOU'RE ON THE PITCH — THE BOOK IS READ-ONLY WHILE YOU PLAY"
       : wallet.balance < BET_MIN_STAKE
         ? 'OUT OF CREDITS — RIDE YOUR OPEN BETS HOME'
         : '';
 }
 
-// ----- courtside: the book on the match in front of you -----
+// ----- pitchside: the book on the match in front of you -----
 function renderBetBar(room: any, me: any, viewMatch: any, spectating: boolean) {
   const bar = $('bet-bar');
   const pill = $('bet-pill');
@@ -3736,7 +3510,7 @@ function renderCrowns(room: any) {
   el.classList.remove('hidden');
   el.innerHTML = '';
   el.appendChild(
-    crownCard('🏆 GAME WINNER', room.championName || 'CHAMPION', 'WINS THE TOURNAMENT')
+    crownCard('🏆 CUP WINNER', room.championName || 'CHAMPION', 'WINS THE TOURNAMENT')
   );
   // no bet crown when nobody ever staked anything
   if (room.betWinnerName) {
@@ -3859,7 +3633,7 @@ function updateWaitingOverlay(room: any, me: any) {
     const ts = room.teamSize ?? 1;
     sub =
       ts >= 2
-        ? `${ts}V${ts} ${ts === 2 ? 'DOUBLES' : 'TRIPLES'} — SHARE THE LINK · ${players.length}/${ts * 2} PLAYERS IN`
+        ? `${ts}V${ts} — SHARE THE LINK · ${players.length}/${ts * 2} PLAYERS IN`
         : 'SHARE THIS CODE OR LINK WITH A FRIEND';
   } else if (isHost) {
     sub =
@@ -3917,10 +3691,12 @@ function frame() {
     const size = canvasCssSize();
     const key = document.hidden
       ? menuSceneKey // hidden: renders are skipped, don't mark as drawn
-      : `${selectedCourt}|${size.w}x${size.h}|${window.devicePixelRatio}`;
+      : `${selectedPitch}|${size.w}x${size.h}|${window.devicePixelRatio}`;
     if (key !== menuSceneKey || sceneIsAnimating()) {
       menuSceneKey = key;
-      drawScene({ flip: 1, court: selectedCourt, phase: 0, servingSide: 0, players: [], ball: null });
+      drawScene({
+        flip: 1, pitch: selectedPitch, phase: 0, kickoffSide: 0, players: [], ball: null,
+      });
     }
     return;
   }
@@ -3931,7 +3707,7 @@ function frame() {
   if (room.mode === MODE_TOURNAMENT) updateTourneyFeed(room);
 
   // input flush (only meaningful while in a match). While an overlay is up
-  // the controller drives menu focus instead — don't also swing with A/B.
+  // the controller drives menu focus instead — don't also kick with A/B.
   if (myMatch) {
     const gp = activeNavLayer() ? null : pollGamepad();
     const [kx, ky] = keyboardDir();
@@ -3942,7 +3718,7 @@ function frame() {
         : gp && (gp[0] !== 0 || gp[1] !== 0)
           ? gp
           : [kx, ky];
-    sendDir(dir[0], dir[1]);
+    sendInput(dir[0], dir[1], sprintHeld());
   }
 
   // which match do we look at? mine, else my just-finished one (the server
@@ -4037,10 +3813,9 @@ function frame() {
   const flip = myMatch ? (me.side === 1 ? -1 : 1) : 1;
   const players = matchPlayerList(viewMatch.id);
 
-  const ruleset = room.ruleset ?? RULES_TENNIS;
-  // crowd reacts before any result-screen early return so the match-winning
-  // roar still fires on the frame the match flips to GAME_OVER
-  crowdFrame(viewMatch, getBall(viewMatch.id), ruleset);
+  // crowd reacts before any result-screen early return so the full-time
+  // roar still fires on the frame the match flips to PHASE_OVER
+  crowdFrame(viewMatch, getBall(viewMatch.id));
   if (viewMatch.state === M_DONE && !spectating && doneTourney) {
     // tournament match result: win → next round awaits; loss → eliminated
     showOverlay('gameover');
@@ -4085,24 +3860,17 @@ function frame() {
       // Both sides dropped and neither came back: no winner, nothing awarded.
       $('gameover-title').textContent = 'MATCH ABANDONED';
       $('gameover-score').textContent = viewMatch.pointMsg;
-    } else if (ruleset === RULES_TARGETS) {
-      $('gameover-title').textContent = '🎯 DRILL COMPLETE';
-      $('gameover-score').textContent = viewMatch.pointMsg;
-    } else if (ruleset === RULES_BEERPONG) {
-      $('gameover-title').textContent = iWon ? '🍺 YOU WIN!' : '🍺 YOU LOSE';
-      $('gameover-score').textContent =
-        `${viewMatch.pointMsg}  —  CUPS SUNK ${viewMatch.p0Points}-${viewMatch.p1Points}`;
     } else {
       $('gameover-title').textContent = iWon ? 'YOU WIN!' : 'YOU LOSE';
       $('gameover-score').textContent =
-        `${viewMatch.pointMsg}  —  FINAL GAMES ${viewMatch.p0Games}-${viewMatch.p1Games}`;
+        `${viewMatch.pointMsg}  —  FULL TIME ${viewMatch.p0Goals}-${viewMatch.p1Goals}`;
     }
     const btn = $('rematch-btn') as HTMLButtonElement;
     const iVoted = (viewMatch.rematchVotes & (1 << me.side)) !== 0;
     const theyVoted = (viewMatch.rematchVotes & (1 << (1 - me.side))) !== 0;
     const rival = (room.teamSize ?? 1) >= 2 ? 'The Other Team' : 'Opponent';
     btn.textContent = room.vsBot
-      ? ruleset === RULES_TARGETS ? 'Go Again' : 'Rematch'
+      ? 'Rematch'
       : iVoted
         ? `Waiting For ${rival}… (1/2)`
         : theyVoted
@@ -4122,14 +3890,14 @@ function frame() {
   // A tournament match with bettors in the room opens with a betting window
   // in FRONT of the 3-2-1. That stretch gets a quiet chip, not a giant
   // number counting down from 15 with a beep every second.
-  const cdTicks = viewMatch.phase === PHASE_SERVE ? (viewMatch.startTicks ?? 0) : 0;
+  const cdTicks = viewMatch.phase === PHASE_KICKOFF ? (viewMatch.startTicks ?? 0) : 0;
   const rawCd = cdTicks > 0 ? Math.ceil(cdTicks / TICK_HZ) : 0;
   const betSecs = rawCd - COUNTDOWN_SECS;
   const windowChip = $('bet-window-chip');
   const showWindow = betSecs > 0 && !!bookOf(viewMatch.id)?.open;
   windowChip.classList.toggle('hidden', !showWindow);
   if (showWindow) {
-    const txt = `BETS OPEN · MATCH IN ${betSecs}s`;
+    const txt = `BETS OPEN · KICK OFF IN ${betSecs}s`;
     if (windowChip.textContent !== txt) windowChip.textContent = txt;
   }
   const cdNum = betSecs > 0 ? 0 : rawCd;
@@ -4143,69 +3911,49 @@ function frame() {
     } else {
       countdownEl.textContent = '';
       if (prevCountdown === 1) {
-        showToast('GO!', '#8cf08c');
+        showToast('KICK OFF!', '#8cf08c');
         playGo();
       }
     }
     prevCountdown = cdNum;
   }
 
-  // ball with client-side extrapolation between server ticks
+  // ball with client-side extrapolation between server ticks. The ball rolls
+  // on the ground most of the time, so this is plain velocity integration
+  // with gravity applied only while it is airborne.
   const ball = getBall(viewMatch.id);
   let renderBall: Scene['ball'] = null;
   if (ball && ball.active) {
     let { x, y, z, vz } = ball;
     const snap = ballSnapshots.get(String(viewMatch.id));
-    // hitstop: the server pins the ball at the contact point with the launch
-    // velocity already loaded — extrapolating would fly it off mid-freeze
-    const frozen = (ball.freezeTicks ?? 0) > 0;
-    if (snap && !frozen) {
+    // a dribbled ball is pinned to its owner's feet server-side — the owner's
+    // own smoothing already moves it, so don't extrapolate it away
+    if (snap && !ball.hasOwner) {
       const dt = Math.min(0.1, (now - snap.at) / 1000);
       const r = snap.row;
-      // custom rules can change gravity — extrapolate with the room's value
+      // custom rules can change the ball's weight — use the room's gravity
       const grav = GRAVITY * (room.gravityMul ?? 1);
       x = r.x + r.vx * dt;
       y = r.y + r.vy * dt;
-      z = Math.max(0, r.z + r.vz * dt + 0.5 * grav * dt * dt);
-      vz = r.vz + grav * dt;
+      z = Math.max(0, r.z + r.vz * dt + (r.z > 0 ? 0.5 * grav * dt * dt : 0));
+      vz = r.z > 0 ? r.vz + grav * dt : r.vz;
     }
     renderBall = {
       x, y, z,
       vx: ball.vx, vy: ball.vy, vz,
-      lastHitSide: ball.lastHitSide,
-      rallyHits: ball.rallyHits ?? 0,
-      spinX: ball.spinX ?? 0,
-      freezeTicks: ball.freezeTicks ?? 0,
+      lastTouchSide: ball.lastTouchSide,
+      hasOwner: ball.hasOwner,
     };
   }
-  const heat = 1 + Math.min(0.8, (ball?.rallyHits ?? 0) * 0.06);
-
-  // rally heat counter
-  const rallyEl = $('rally-counter');
-  const hits = ball?.active ? (ball.rallyHits ?? 0) : 0;
-  const rallyText =
-    hits >= 12 ? `🔥🔥🔥 RALLY ×${hits} 🔥🔥🔥`
-    : hits >= 8 ? `🔥🔥 RALLY ×${hits}`
-    : hits >= 4 ? `🔥 RALLY ×${hits}` : '';
-  if (rallyEl.textContent !== rallyText) {
-    rallyEl.textContent = rallyText;
-    rallyEl.dataset.tier = hits >= 12 ? '3' : hits >= 8 ? '2' : '1';
-    if (rallyText) {
-      rallyEl.classList.remove('pop');
-      void (rallyEl as HTMLElement).offsetWidth;
-      rallyEl.classList.add('pop');
-    }
-  }
-
-  serveSpeedChip(viewMatch, ball, ruleset);
 
   // HUD
-  const targets = matchTargets(viewMatch.id);
-  updatePlates(viewMatch, players, ruleset, targets);
-  updatePointCard(viewMatch, players, ruleset);
-  const courtSideByName = new Map(players.map(p => [p.name, p.side] as [string, number]));
-  updateChat(room.id, me.name, courtSideByName);
-  pointSound(viewMatch, mSide);
+  const goals = goalsFor(viewMatch.id);
+  updatePlates(viewMatch, players, mSide);
+  updateClock(viewMatch);
+  updatePointCard(viewMatch, players, goals);
+  const pitchSideByName = new Map(players.map(p => [p.name, p.side] as [string, number]));
+  updateChat(room.id, me.name, pitchSideByName);
+  goalSound(viewMatch, mSide);
   setTouchVisible(!spectating);
   // spectator chrome: exit pill, the broadcast bug under the left plate, and
   // nameplates over the heads (they say who's who — no banner needed).
@@ -4216,14 +3964,14 @@ function frame() {
   renderBetBar(room, me, viewMatch, spectating);
   document.body.classList.toggle('spectating', spectating);
   if (spectating) {
-    const courtIdx = liveMatches.findIndex(m => m.id === viewMatch.id);
-    const courtBit =
-      liveMatches.length > 1 && courtIdx >= 0
-        ? ` · COURT ${courtIdx + 1}/${liveMatches.length}`
+    const pitchIdx = liveMatches.findIndex(m => m.id === viewMatch.id);
+    const pitchBit =
+      liveMatches.length > 1 && pitchIdx >= 0
+        ? ` · PITCH ${pitchIdx + 1}/${liveMatches.length}`
         : '';
     const chipText =
       room.mode === MODE_TOURNAMENT
-        ? `WATCHING · ROUND ${viewMatch.round}${courtBit}`
+        ? `WATCHING · ROUND ${viewMatch.round}${pitchBit}`
         : 'WATCHING LIVE';
     const chipEl = $('spectate-chip-text');
     if (chipEl.textContent !== chipText) chipEl.textContent = chipText;
@@ -4231,93 +3979,53 @@ function frame() {
       const tag = nameTagEls[side];
       // Solo matches carry the rating on the nameplate; a team's average
       // would just be noise, so team labels stay as they are.
-      const solo = players.filter(p => p.side === side).length === 1;
-      const rating = solo ? mmrOf(players.find(p => p.side === side)) : null;
+      const team = sidePlayers(players, side);
+      const rating = team.length === 1 ? mmrOf(team[0]) : null;
       const name = sideLabel(players, side) + (rating === null ? '' : ` · ${rating}`);
       if (tag && tag.textContent !== name) tag.textContent = name;
     }
   }
-  momentumCallout(me, !!myMatch);
-  const meterFull = !spectating && (me.momentum ?? 0) >= MOMENTUM_MAX;
-  const modeHint =
-    ruleset === RULES_BEERPONG
-      ? 'TAKE TURNS THROWING · AIM WITH MOVE AT THE STRIKE · TIMING = ACCURACY · '
-      : ruleset === RULES_TARGETS
-        ? 'LAND YOUR SHOTS ON THE BULLSEYES · '
-        : '';
   // the hint line follows whichever device the player actually used last
   help.textContent = spectating
     ? usingPad()
       ? ''
       : room.mode === MODE_TOURNAMENT
-        ? (liveMatches.length > 1 ? 'N NEXT COURT · ' : '') +
+        ? (liveMatches.length > 1 ? 'N NEXT PITCH · ' : '') +
           'B BRACKET · ENTER CHAT · 1-8 EMOTES'
         : 'ENTER CHAT · 1-8 EMOTES'
-    : meterFull
-      ? usingPad()
-        ? '⚡ METER FULL — PRESS Ⓐ+Ⓑ TOGETHER FOR THE SCREW FINISHER ⚡'
-        : '⚡ METER FULL — PRESS HIT+LOB TOGETHER FOR THE SCREW FINISHER ⚡'
-      : usingPad()
-        ? modeHint + 'STICK MOVE · Ⓐ HIT · Ⓑ LOB'
-        : touchAvailable
-          ? modeHint + 'DRAG LEFT TO MOVE · HOLD HIT FOR POWER'
-          : modeHint + 'WASD MOVE · SPACE HIT · K LOB · ENTER CHAT · ESC MENU';
+    : usingPad()
+      ? 'STICK MOVE · Ⓐ KICK (HOLD) · Ⓑ CHIP · Ⓧ SLIDE · RT SPRINT'
+      : touchAvailable
+        ? 'DRAG LEFT TO MOVE · HOLD KICK FOR POWER · ⚡ SPRINT'
+        : 'WASD MOVE · SPACE KICK (HOLD) · K CHIP · L SLIDE · SHIFT SPRINT · ESC MENU';
   if (spectating) {
     // no standing banner — the nameplates and the bug carry the context, so
-    // mid-court text stays reserved for the point calls
-    setBanner(viewMatch.phase === PHASE_POINT_OVER ? viewMatch.pointMsg : '');
-  } else if (viewMatch.phase === PHASE_SERVE) {
-    const iAmServer =
-      viewMatch.servingSide === me.side &&
-      ((room.teamSize ?? 1) < 2 ||
-        (me.teamSlot ?? 0) === servingSlotOf(viewMatch, room.teamSize ?? 1));
-    if (cdTicks > 0) {
-      setBanner('GET READY…');
-    } else if (viewMatch.servingSide === me.side && !iAmServer) {
-      setBanner("PARTNER'S SERVE — GET IN POSITION");
-    } else if (iAmServer) {
-      setBanner(
-        ball?.active
-          ? 'STRIKE!'
-          : ruleset === RULES_BEERPONG
-            ? 'YOUR THROW — PRESS HIT'
-            : 'PRESS HIT TO TOSS'
-      );
-    } else {
-      setBanner(
-        ruleset === RULES_TARGETS
-          ? 'INCOMING BALL…'
-          : ruleset === RULES_BEERPONG
-            ? "OPPONENT'S THROW…"
-            : 'OPPONENT SERVES...'
-      );
-    }
-  } else if (viewMatch.phase === PHASE_POINT_OVER) {
+    // mid-pitch text stays reserved for goals and restarts
+    setBanner(viewMatch.phase === PHASE_PAUSE ? viewMatch.pointMsg : '');
+  } else if (viewMatch.phase === PHASE_KICKOFF) {
+    const mine = viewMatch.kickoffSide === me.side;
+    setBanner(
+      cdTicks > 0 ? 'GET READY…' : mine ? 'YOUR KICK OFF — PLAY IT FORWARD' : 'THEIR KICK OFF…'
+    );
+  } else if (viewMatch.phase === PHASE_PAUSE) {
     setBanner(viewMatch.pointMsg);
+  } else if (viewMatch.graceTicks > 0 && viewMatch.restartKind !== RK_NONE) {
+    setBanner(
+      viewMatch.restartSide === me.side
+        ? `${RESTART_NAMES[viewMatch.restartKind] ?? 'RESTART'} — YOURS`
+        : `${RESTART_NAMES[viewMatch.restartKind] ?? 'RESTART'} — THEIRS`
+    );
   } else {
     setBanner('');
   }
 
   const sceneObj: Scene = {
     flip,
-    court: room.court ?? 0,
+    pitch: room.pitch ?? 0,
     phase: viewMatch.phase,
-    servingSide: viewMatch.servingSide,
-    // team play: exactly one of the (up to) six rigs holds the toss pose
-    serverRigSlot:
-      viewMatch.servingSide +
-      ((room.teamSize ?? 1) >= 2 ? servingSlotOf(viewMatch, room.teamSize ?? 1) : 0) * 2,
-    ruleset,
-    targets: targets.map(t => ({
-      id: String(t.id),
-      x: t.x,
-      y: t.y,
-      side: t.side,
-      alive: t.alive,
-      radius: t.radius,
-    })),
+    kickoffSide: viewMatch.kickoffSide ?? 0,
     players: players.map(p => {
-      const pos = renderPosition(p, now, frameDt, heat);
+      const pos = renderPosition(p, now, frameDt);
       return {
         x: pos.x,
         y: pos.y,
@@ -4325,11 +4033,14 @@ function frame() {
         serverY: p.y,
         side: p.side,
         rigSlot: p.side + (p.teamSlot ?? 0) * 2,
-        swingTicks: p.swingTicks,
-        swingKind: p.swingKind ?? 0,
-        lungeTicks: p.lungeTicks ?? 0,
+        kickTicks: p.kickTicks ?? 0,
+        kickKind: p.kickKind ?? 0,
+        kickHeld: !!p.kickHeld,
+        slideTicks: p.slideTicks ?? 0,
+        role: p.role ?? 0,
         dirX: p.dirX,
         dirY: p.dirY,
+        sprinting: !!p.sprinting,
         characterId: p.characterId ?? 0,
       };
     }),
@@ -4344,146 +4055,40 @@ function frame() {
     replayPendingAt = 0;
     replayHoldAt = 0;
     stageEl.classList.remove('replay');
-    resetVarReview();
     prevPhaseMain = -1;
-    endCine();
-    prevLiveSpin = 0;
   }
-  if (viewMatch.phase === PHASE_RALLY) {
+  if (viewMatch.phase === PHASE_LIVE) {
     replayBuf.push({ t: now, scene: sceneObj });
     while (replayBuf.length && replayBuf[0].t < now - 6000) replayBuf.shift();
   }
-  if (prevPhaseMain === PHASE_RALLY && viewMatch.phase === PHASE_POINT_OVER && replayBuf.length > 10) {
+  // Only a real stoppage is worth showing back — a goal or the end of a half.
+  // Kick-ins, corners and goal kicks come and go too fast for a cut.
+  const worthReplay =
+    viewMatch.restartKind === RK_KICKOFF ||
+    viewMatch.restartKind === RK_HALFTIME ||
+    viewMatch.restartKind === RK_OVERTIME;
+  if (
+    prevPhaseMain === PHASE_LIVE && viewMatch.phase === PHASE_PAUSE &&
+    worthReplay && replayBuf.length > 10
+  ) {
     replayFrames = replayBuf.filter(f => f.t >= now - REPLAY_WINDOW_MS);
     if (replayFrames.length > 5) {
       replayPendingAt = now + REPLAY_CUT_DELAY_MS;
       replayIdx = 0;
       replayHoldAt = 0;
-      // freeze-frame for the post-landing hold: the deactivated server ball
-      // row keeps the landing x/y, so the replay can rest the ball exactly
-      // where the point ended (right on the line, or just past it)
+      // freeze-frame for the hold at the end of playback: the ball sits where
+      // the server left it when play stopped
       replayEndScene = ball
         ? {
             ...sceneObj,
             ball: {
-              x: ball.x, y: ball.y, z: 0.55,
+              x: ball.x, y: ball.y, z: Math.max(0, ball.z),
               vx: 0, vy: 0, vz: 0,
-              lastHitSide: ball.lastHitSide,
-              rallyHits: ball.rallyHits ?? 0,
-              spinX: 0,
+              lastTouchSide: ball.lastTouchSide,
+              hasOwner: false,
             },
           }
         : null;
-
-      // ----- VAR data: final shot's flight, bounce mark, line call -----
-      const lastBall = replayFrames[replayFrames.length - 1].scene.ball;
-      const shotSide = lastBall?.lastHitSide ?? 0;
-      varShotStartIdx = 0;
-      for (let i = replayFrames.length - 1; i >= 0; i--) {
-        const b = replayFrames[i].scene.ball;
-        if (!b || b.lastHitSide !== shotSide) {
-          varShotStartIdx = i + 1;
-          break;
-        }
-      }
-      const shotFrames = replayFrames.slice(varShotStartIdx);
-      // near-duplicate points would give the curve degenerate tangents
-      varTrailPts = [];
-      for (const f of shotFrames) {
-        const b = f.scene.ball;
-        if (!b) continue;
-        const prev = varTrailPts[varTrailPts.length - 1];
-        if (prev && Math.hypot(b.x - prev.x, b.y - prev.y, b.z - prev.z) < 0.2) continue;
-        varTrailPts.push({ x: b.x, y: b.y, z: b.z });
-      }
-      // The landing under review is the shot's FIRST bounce. The ball row
-      // rests where the point DIED: for OUT and NET that IS the first
-      // landing, but a rally won on a double bounce leaves it at the SECOND
-      // bounce — usually long past the line — so judging the resting row
-      // calls a good shot OUT. Prefer the server's own first-bounce tick,
-      // and fall back to spotting the rebound in the replay frames.
-      const noted = ballFirstBounce.get(String(viewMatch.id));
-      const firstBounce: VarBounce | null =
-        noted && noted.hitSide === shotSide
-          ? {
-              x: noted.x, y: noted.y, dx: noted.vx, dy: noted.vy,
-              idx: shotFrameAt(shotFrames, noted.at),
-            }
-          : scanFirstBounce(shotFrames);
-      // no bounce survived → the ball died on its first landing (or at the
-      // net), and the deactivated row holds that spot exactly
-      const landX = firstBounce?.x ?? ball?.x ?? varTrailPts[varTrailPts.length - 1]?.x ?? 0;
-      const landY = firstBounce?.y ?? ball?.y ?? varTrailPts[varTrailPts.length - 1]?.y ?? 0;
-
-      const landedSide = landY < 0 ? 0 : 1;
-      // Signed distance from the ball's CENTRE to the nearest line: positive
-      // past it, negative inside the court. (The IN/OUT boundary itself sits
-      // LINE_MARGIN further out — a ball whose print clips the line counts.)
-      const lineGap = Math.max(
-        Math.abs(landX) - COURT_HALF_WID,
-        Math.abs(landY) - COURT_HALF_LEN
-      );
-      // What the viewer actually sees: the gap in cm between the bounce PRINT
-      // and the paint — positive is clear air, negative means the mark is
-      // sitting over the line. The mark is drawn at LINE_MARGIN radius, the
-      // same margin the server rules by, so "the mark touches the line" is
-      // exactly "IN" and this number can be checked against the picture.
-      // (Measuring the centre instead would put the tightest possible OUT at
-      // LINE_MARGIN ≈ 26 cm, far more than the call really was.)
-      const printGap = (Math.abs(lineGap) - LINE_MARGIN) * UNIT_CM;
-
-      // Line call — trust the server's reason while the point message still
-      // carries it; a game/match-winning point replaces the message, so
-      // re-judge the first bounce exactly like game_tick does.
-      const msg: string = viewMatch.pointMsg ?? '';
-      varCall = null;
-      if (ruleset === RULES_TENNIS) {
-        if (msg.startsWith('NET!')) varCall = 'NET';
-        else if (msg.startsWith('OUT!')) varCall = 'OUT';
-        else if (msg.startsWith('DOUBLE BOUNCE!')) varCall = 'IN';
-        else if (!firstBounce && ball && Math.abs(ball.y) < 2 && ball.z > 0.5) varCall = 'NET';
-        else varCall = lineGap <= LINE_MARGIN && landedSide !== shotSide ? 'IN' : 'OUT';
-      }
-
-      // Bounce mark: the print of that first bounce, revealed as playback
-      // reaches it (OUT/NET land on the last frame — the cut to the overhead
-      // verdict cam follows immediately).
-      varMarkInfo = {
-        x: landX,
-        y: landY,
-        dx: firstBounce?.dx ?? lastBall?.vx ?? 0,
-        dy: firstBounce?.dy ?? lastBall?.vy ?? 1,
-      };
-      varMarkAtIdx = firstBounce ? firstBounce.idx : Math.max(0, shotFrames.length - 1);
-      // close the trail on the ground where the ball actually came down
-      // (a NET call stops in the air at the tape instead)
-      if (ball) {
-        const lz = varCall === 'NET' ? Math.max(ball.z, 0.3) : 0;
-        const prev = varTrailPts[varTrailPts.length - 1];
-        if (!prev || Math.hypot(ball.x - prev.x, ball.y - prev.y, lz - prev.z) > 0.2) {
-          varTrailPts.push({ x: ball.x, y: ball.y, z: lz });
-        }
-      }
-      // VAR is a LINE-CALL review, so it only kicks in when the bounce was
-      // tight enough to be in doubt. Everything else is clear-cut — a ball
-      // buried in the net, a mishit that came down on the striker's own side,
-      // a bounce in the middle of the court or comfortably long — and gets the
-      // plain broadcast replay: no Hawk-Eye track, bounce mark or verdict card.
-      varActive =
-        (varCall === 'IN' || varCall === 'OUT') &&
-        landedSide !== shotSide &&
-        printGap <= VAR_CLOSE_CM;
-      if (varActive) {
-        // verdict card subtitle: the gap between mark and paint. An OUT call
-        // always has one (the print cleared the line); an IN print that's
-        // still touching the line has none to quote.
-        varSub =
-          printGap <= 0
-            ? 'ON THE LINE!'
-            : `${varCall} BY ${Math.max(1, Math.round(printGap))} CM`;
-      } else {
-        resetVarReview();
-      }
     }
   }
   // beat's up — now cut to the broadcast replay cam
@@ -4493,151 +4098,41 @@ function frame() {
     replayStart = now;
     stageEl.classList.add('replay');
   }
-  if (viewMatch.phase !== PHASE_POINT_OVER && (replayActive || replayPendingAt > 0)) {
+  if (viewMatch.phase !== PHASE_PAUSE && (replayActive || replayPendingAt > 0)) {
     replayActive = false;
     replayPendingAt = 0;
     replayHoldAt = 0;
     stageEl.classList.remove('replay');
-    stageEl.classList.remove('var-live');
   }
-  if (viewMatch.phase === PHASE_SERVE) replayBuf.length = 0;
+  if (viewMatch.phase === PHASE_KICKOFF) replayBuf.length = 0;
   prevPhaseMain = viewMatch.phase;
 
-  // ----- SUPER FINISHER cinematic: slow-mo playback + super cam -----
-  const liveSpin = renderBall?.spinX ?? 0;
-  if (viewMatch.phase === PHASE_RALLY && renderBall && !replayActive) {
-    // anticipation: my own combo just fired with the ball inbound → slow NOW,
-    // before the server even confirms the swing
-    if (
-      !cineActive && myMatch &&
-      now - localSuperAt < 500 &&
-      renderBall.lastHitSide !== me.side &&
-      Math.hypot(renderBall.x - me.x, renderBall.y - me.y) < 34
-    ) {
-      localSuperAt = -1e9;
-      startCine(now, me.side, now, false);
-    }
-    // an armed finisher on court (opponent or spectated player) with the
-    // ball closing in — everyone gets the show
-    if (!cineActive) {
-      for (const p of players) {
-        if (
-          (p.swingKind ?? 0) === SWING_SUPER &&
-          (p.swingTicks ?? 0) > 0 &&
-          renderBall.lastHitSide !== p.side &&
-          Math.hypot(renderBall.x - p.x, renderBall.y - p.y) < 34
-        ) {
-          startCine(now, p.side, now, !!myMatch && me.side !== p.side);
-          break;
-        }
-      }
-    }
-    // launch spotted live with no warning (bot finishers arm and strike in
-    // the same tick): rewind a beat so the contact plays back in slow motion
-    if (!cineActive && liveSpin !== 0 && prevLiveSpin === 0) {
-      const striker = renderBall.lastHitSide;
-      startCine(now, striker, now - CINE_REWIND_MS, !!myMatch && me.side !== striker);
-    }
-  }
-  prevLiveSpin = liveSpin;
-  if (cineActive && (viewMatch.phase !== PHASE_RALLY || replayActive)) endCine();
-  if (cineActive) {
-    cinePlayhead += frameDt * 1000 * (cineCatch ? cineCatchRate : cineSlow);
-    // the buffered frame at the playhead (scan back from the newest — the
-    // playhead only trails live by a fraction of a second)
-    let bi = replayBuf.length - 1;
-    while (bi > 0 && replayBuf[bi].t > cinePlayhead) bi--;
-    const buffered = bi >= 0 ? replayBuf[bi] : null;
-    if (!buffered || cinePlayhead >= now || now - cineStartAt > 2600) {
-      endCine(); // caught up (or safety valve) — fall through to the live draw
-    } else {
-      const shown = buffered.scene;
-      const launched = !!shown.ball && shown.ball.spinX !== 0;
-      const shownStriker = shown.players.find(p => p.side === cineStriker);
-      if (!cineCatch) {
-        if (launched && cineLaunchSeenAt === 0) cineLaunchSeenAt = now;
-        // hold the flaming launch in slomo for a beat, then fast-forward;
-        // bail early if the swing resolved without a screw (whiff / weak
-        // contact / the server rejected the combo)
-        // grace runs on SHOWN time: the arm needs a server roundtrip before
-        // it appears in buffered frames, and the playhead crawls
-        const whiffed =
-          !launched &&
-          cinePlayhead - cineStartAt > 180 &&
-          (!shownStriker || shownStriker.swingTicks === 0);
-        if (
-          (cineLaunchSeenAt > 0 && now - cineLaunchSeenAt > cineHoldMs) ||
-          (cineLaunchSeenAt === 0 && now - cineStartAt > cineMaxSlowMs) ||
-          whiffed
-        ) {
-          cineCatch = true;
-        }
-      }
-      // the normal game cam draws the shown frame — no cuts, just slow time
-      drawScene(shown);
-      positionHeadAnnos(true);
-      return;
-    }
-  }
-
-  if (replayActive && viewMatch.phase === PHASE_POINT_OVER) {
+  if (replayActive && viewMatch.phase === PHASE_PAUSE) {
     const pt = replayFrames[0].t + (now - replayStart) * REPLAY_SPEED;
     while (replayIdx < replayFrames.length - 1 && replayFrames[replayIdx + 1].t <= pt) {
       replayIdx++;
     }
-    const shotLen = Math.max(1, replayFrames.length - 1 - varShotStartIdx);
     if (replayIdx >= replayFrames.length - 1) {
-      // playback caught up with the landing — a close call cuts to the
-      // Hawk-Eye overhead verdict shot (bounce mark, full ball track, IN/OUT
-      // card) and holds it; anything clear-cut just rests on the landing for
-      // a beat before the cut back to live
-      if (replayHoldAt === 0) {
-        replayHoldAt = now;
-        if (varActive) showVarCard();
-      }
-      if (now - replayHoldAt >= (varActive ? REPLAY_HOLD_MS : REPLAY_TAIL_MS)) {
+      // playback caught up — rest on the finish for a beat, then cut to live
+      if (replayHoldAt === 0) replayHoldAt = now;
+      if (now - replayHoldAt >= REPLAY_TAIL_MS) {
         replayActive = false;
         replayHoldAt = 0;
         stageEl.classList.remove('replay');
-        stageEl.classList.remove('var-live');
         drawScene(sceneObj);
       } else {
         drawScene({
           ...(replayEndScene ?? replayFrames[replayFrames.length - 1].scene),
           replayCam: true,
-          varReview: varActive
-            ? {
-                trail: varTrailPts,
-                progress: 1,
-                mark: varMarkInfo,
-                call: varCall,
-                overhead: true,
-              }
-            : undefined,
         });
       }
     } else {
-      // slow-mo playback on the broadcast cam — under VAR the Hawk-Eye track
-      // draws itself in behind the ball, otherwise it's a plain replay
-      const relIdx = replayIdx - varShotStartIdx;
-      drawScene({
-        ...replayFrames[replayIdx].scene,
-        replayCam: true,
-        varReview: varActive
-          ? {
-              trail: varTrailPts,
-              progress: Math.max(0, Math.min(1, relIdx / shotLen)),
-              mark: relIdx >= varMarkAtIdx ? varMarkInfo : null,
-              call: varCall,
-              overhead: false,
-            }
-          : undefined,
-      });
+      // slow-mo playback on the broadcast cam
+      drawScene({ ...replayFrames[replayIdx].scene, replayCam: true });
     }
   } else if (replayPendingAt > 0 && replayEndScene) {
-    // the beat before the cut: still the live cam, but the ball rests where it
-    // pitched — the server's row goes inactive on the landing tick, so without
-    // this it would blink out at the same moment as the call
+    // the beat before the cut: still the live cam, but the ball rests where
+    // play stopped rather than blinking out with the whistle
     drawScene({ ...sceneObj, ball: replayEndScene.ball });
   } else {
     drawScene(sceneObj);

@@ -27,15 +27,50 @@ export const DATABASE_NAME =
 // extrapolation is wall-clock based and needs no tick rate.
 export const TICK_HZ = 30;
 
-// Court geometry — must mirror spacetimedb/src/index.ts.
-export const COURT_HALF_LEN = 39;
-export const COURT_HALF_WID = 21.6;
-export const SERVICE_LINE = 21;
-export const LINE_MARGIN = 0.85; // ball may land this far past the line and still be IN
-export const NET_HEIGHT = 3.2;
-export const GRAVITY = -70;
-export const PLAYER_SPEED = 26;
-export const REACH = 3.36; // stand-and-hit radius; beyond it a hit is a stretch
+// Pitch geometry — must mirror spacetimedb/src/index.ts.
+export const PITCH_HALF_LEN = 40;
+export const PITCH_HALF_WID = 24;
+export const GOAL_HALF_W = 7;
+export const GOAL_HEIGHT = 4.6;
+export const BOX_DEPTH = 11;
+export const BOX_HALF_W = 13;
+export const CENTER_CIRCLE_R = 8;
+export const BALL_RADIUS = 0.55;
+export const GRAVITY = -60;
+export const PLAYER_SPEED = 24;
+export const CONTROL_RADIUS = 2.6; // ball inside this sticks to your feet
+export const KICK_RANGE = 3.0;
+export const STAMINA_MAX = 1000;
+
+// Match format — mirrors HALF_SECONDS / OT_SECONDS.
+export const HALF_SECONDS = 180;
+export const OT_SECONDS = 120;
+
+// Player roles (player.role)
+export const ROLE_OUTFIELD = 0;
+export const ROLE_KEEPER = 1;
+
+// Match phases (match.phase) — mirrors PHASE_* in the module.
+export const PHASE_KICKOFF = 1;
+export const PHASE_LIVE = 2;
+export const PHASE_PAUSE = 3;
+export const PHASE_OVER = 4;
+
+// Restart kinds (match.restartKind) — mirrors RK_*.
+export const RK_NONE = 0;
+export const RK_KICKOFF = 1;
+export const RK_KICKIN = 2;
+export const RK_GOALKICK = 3;
+export const RK_CORNER = 4;
+export const RK_HALFTIME = 5;
+export const RK_OVERTIME = 6;
+export const RK_DROP = 7;
+
+// Kick kinds — mirrors KICK_*.
+export const KICK_NORMAL = 0;
+export const KICK_CHIP = 1;
+// Full kick charge, in seconds — mirrors KICK_CHARGE_TICKS / TICK_HZ.
+export const KICK_CHARGE_SECS = 0.8;
 // Run-speed stat only (movement prediction) — mirrors CHAR_STATS[].speed
 // in spacetimedb/src/index.ts, same character order.
 export const CHAR_SPEED = [

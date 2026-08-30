@@ -7,6 +7,14 @@ entire backend, a scheduled tick reducer runs the authoritative simulation,
 and a Vite + TypeScript Three.js client renders it with a TV camera. This
 document is the plan; nothing here ships into digital-football.
 
+> **Status: M0–M3 landed.** The module and client below are built: pitch,
+> ball physics, dribbling, charged kicks, chips, slide tackles, sprint and
+> stamina, keeper and outfield bots, goals, the match clock with halves and
+> golden goal, every restart, plus the whole inherited meta layer (rooms,
+> accounts, reconnect, tournaments, betting, spectating). Still open, and
+> still described below as future work: the shooting-gallery minigame, an
+> audio pass, and the deferred list at the bottom.
+
 ## Vision
 
 Small-sided, fast, physical arcade football. Each human controls **one

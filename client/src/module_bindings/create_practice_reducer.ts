@@ -11,11 +11,10 @@ import {
 } from "spacetimedb";
 
 export default {
-  court: __t.u8(),
-  ruleset: __t.u8(),
+  pitch: __t.u8(),
   botLevel: __t.u8(),
   gravityMul: __t.f32(),
-  dragMul: __t.f32(),
-  speedMul: __t.f32(),
+  frictionMul: __t.f32(),
+  powerMul: __t.f32(),
   bounceMul: __t.f32(),
 };

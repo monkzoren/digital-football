@@ -40,6 +40,8 @@ import CreatePracticeReducer from "./create_practice_reducer";
 import CreateTournamentReducer from "./create_tournament_reducer";
 import ForfeitReducer from "./forfeit_reducer";
 import JoinLobbyReducer from "./join_lobby_reducer";
+import KickReducer from "./kick_reducer";
+import KickReleaseReducer from "./kick_release_reducer";
 import LeaveLobbyReducer from "./leave_lobby_reducer";
 import PlaceBetReducer from "./place_bet_reducer";
 import RematchReducer from "./rematch_reducer";
@@ -51,8 +53,7 @@ import SetNameReducer from "./set_name_reducer";
 import SetTournamentSettingsReducer from "./set_tournament_settings_reducer";
 import SpectateMatchReducer from "./spectate_match_reducer";
 import StartTournamentReducer from "./start_tournament_reducer";
-import SwingReducer from "./swing_reducer";
-import SwingReleaseReducer from "./swing_release_reducer";
+import TackleReducer from "./tackle_reducer";
 
 // Import all procedure arg schemas
 
@@ -62,11 +63,11 @@ import BallRow from "./ball_table";
 import BetRow from "./bet_table";
 import BookRow from "./book_table";
 import ChatRow from "./chat_table";
+import GoalEventRow from "./goal_event_table";
 import LobbyRow from "./lobby_table";
 import MatchRow from "./match_table";
 import MyMatchLogRow from "./my_match_log_table";
 import PlayerRow from "./player_table";
-import TargetRow from "./target_table";
 import TeamRow from "./team_table";
 import WalletRow from "./wallet_table";
 
@@ -138,6 +139,20 @@ const tablesSchema = __schema({
       { name: 'chat_id_key', constraint: 'unique', columns: ['id'] },
     ],
   }, ChatRow),
+  goalEvent: __table({
+    name: 'goal_event',
+    indexes: [
+      { accessor: 'id', name: 'goal_event_id_idx_btree', algorithm: 'btree', columns: [
+        'id',
+      ] },
+      { accessor: 'byMatch', name: 'goal_event_match_id_idx_btree', algorithm: 'btree', columns: [
+        'matchId',
+      ] },
+    ],
+    constraints: [
+      { name: 'goal_event_id_key', constraint: 'unique', columns: ['id'] },
+    ],
+  }, GoalEventRow),
   lobby: __table({
     name: 'lobby',
     indexes: [
@@ -184,20 +199,6 @@ const tablesSchema = __schema({
       { name: 'player_identity_key', constraint: 'unique', columns: ['identity'] },
     ],
   }, PlayerRow),
-  target: __table({
-    name: 'target',
-    indexes: [
-      { accessor: 'id', name: 'target_id_idx_btree', algorithm: 'btree', columns: [
-        'id',
-      ] },
-      { accessor: 'byMatch', name: 'target_match_id_idx_btree', algorithm: 'btree', columns: [
-        'matchId',
-      ] },
-    ],
-    constraints: [
-      { name: 'target_id_key', constraint: 'unique', columns: ['id'] },
-    ],
-  }, TargetRow),
   team: __table({
     name: 'team',
     indexes: [
@@ -243,6 +244,8 @@ const reducersSchema = __reducers(
   __reducerSchema("create_tournament", CreateTournamentReducer),
   __reducerSchema("forfeit", ForfeitReducer),
   __reducerSchema("join_lobby", JoinLobbyReducer),
+  __reducerSchema("kick", KickReducer),
+  __reducerSchema("kick_release", KickReleaseReducer),
   __reducerSchema("leave_lobby", LeaveLobbyReducer),
   __reducerSchema("place_bet", PlaceBetReducer),
   __reducerSchema("rematch", RematchReducer),
@@ -254,8 +257,7 @@ const reducersSchema = __reducers(
   __reducerSchema("set_tournament_settings", SetTournamentSettingsReducer),
   __reducerSchema("spectate_match", SpectateMatchReducer),
   __reducerSchema("start_tournament", StartTournamentReducer),
-  __reducerSchema("swing", SwingReducer),
-  __reducerSchema("swing_release", SwingReleaseReducer),
+  __reducerSchema("tackle", TackleReducer),
 );
 
 /** The schema information for all procedures in this module. This is defined the same way as the procedures would have been defined in the server. */

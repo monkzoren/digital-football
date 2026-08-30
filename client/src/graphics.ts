@@ -29,7 +29,7 @@ export interface GraphicsSettings {
   vhs: boolean;
   /**
    * Render-loop cap in frames per second; 0 = every display refresh.
-   * The server ticks at 20 Hz, so extra frames only re-sample the same
+   * The server ticks at 30 Hz, so extra frames only re-sample the same
    * interpolation — the cap keeps 144/240 Hz displays from burning GPU.
    */
   fpsCap: number;

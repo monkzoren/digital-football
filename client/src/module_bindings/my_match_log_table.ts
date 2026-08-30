@@ -22,8 +22,8 @@ export default __t.row({
   xpBefore: __t.u32().name("xp_before"),
   xpGained: __t.u32().name("xp_gained"),
   levelAfter: __t.u16().name("level_after"),
-  gamesFor: __t.u8().name("games_for"),
-  gamesAgainst: __t.u8().name("games_against"),
+  goalsFor: __t.u8().name("goals_for"),
+  goalsAgainst: __t.u8().name("goals_against"),
   endedBy: __t.u8().name("ended_by"),
   playedAt: __t.timestamp().name("played_at"),
 });

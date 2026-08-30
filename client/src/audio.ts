@@ -133,7 +133,7 @@ function sfx(a: AudioContext): GainNode {
   return sfxNode;
 }
 
-// SFX outlet, optionally panned toward the event's court position (-1..1).
+// SFX outlet, optionally panned toward the event's pitch position (-1..1).
 function out(a: AudioContext, pan: number): AudioNode {
   if (!pan) return sfx(a);
   const p = a.createStereoPanner();
@@ -416,7 +416,7 @@ function whistle(delayMs: number) {
 }
 
 let lastMurmurAt = 0;
-/** Approving buzz for a quality shot mid-rally. intensity 0..1. */
+/** Approving buzz for a bit of quality on the ball. intensity 0..1. */
 export function crowdMurmur(intensity: number) {
   const t = performance.now();
   if (t - lastMurmurAt < 350) return;
@@ -425,7 +425,7 @@ export function crowdMurmur(intensity: number) {
 }
 
 let lastOohAt = 0;
-/** Sharp collective gasp — close line call, screw shot, near miss. */
+/** Sharp collective gasp — a near miss, a shot off the bar. */
 export function crowdOoh(intensity = 0.7) {
   const t = performance.now();
   if (t - lastOohAt < 700) return;
@@ -434,13 +434,13 @@ export function crowdOoh(intensity = 0.7) {
   crowdTone(230, 0.5, 0.05 * intensity, 'sine', -70);
 }
 
-/** Sympathetic groan — ball in the net, a miss. */
+/** Sympathetic groan — a chance spurned, a goal conceded. */
 export function crowdGroan() {
   crowdSwell(1.1, 0.09, 500, 300, 0.2);
   crowdTone(150, 0.7, 0.05, 'sawtooth', -55);
 }
 
-/** Point-won reaction. intensity 0..1 scales volume, length and applause. */
+/** Chance/goal reaction. intensity 0..1 scales volume, length and applause. */
 export function crowdCheer(intensity: number) {
   const i = Math.min(1, Math.max(0, intensity));
   crowdSwell(1.3 + i * 1.2, 0.08 + i * 0.16, 800 + i * 300, 600, 0.12);
@@ -448,7 +448,7 @@ export function crowdCheer(intensity: number) {
   if (i > 0.6) whistle(150 + Math.random() * 250);
 }
 
-/** Full-throated eruption — game won, match won, cups cleared. */
+/** Full-throated eruption — a goal, or the final whistle. */
 export function crowdRoar() {
   crowdSwell(2.8, 0.28, 950, 550, 0.1);
   crowdSwell(2.2, 0.12, 500, 350, 0.15);
@@ -461,24 +461,40 @@ export function crowdRoar() {
 // Game SFX
 // ---------------------------------------------------------------------------
 
-/** Racket contact. power 0..1 scales pitch + volume; pan follows the ball. */
-export function playHit(power: number, pan = 0) {
-  const v = 0.92 + Math.random() * 0.16; // no two hits sound identical
-  noiseBurst(0.07, 0.5 + power * 0.4, (1800 + power * 1400) * v, pan);
-  tone((180 + power * 160) * v, 0.09, 0.35, 'triangle', -60, pan);
-  // heavy strikes carry a chesty thump under the crack
-  if (power > 0.55) tone(70, 0.1, 0.2 * power, 'sine', -25, pan);
+/** Boot on ball. power 0..1 scales thump + volume; pan follows the ball. */
+export function playKick(pan = 0, power = 0.6) {
+  const v = 0.92 + Math.random() * 0.16; // no two contacts sound identical
+  noiseBurst(0.06, 0.35 + power * 0.35, (900 + power * 900) * v, pan);
+  tone((150 + power * 120) * v, 0.1, 0.4, 'triangle', -70, pan);
+  // a proper strike carries a chesty thump under the leather crack
+  if (power > 0.5) tone(62, 0.13, 0.26 * power, 'sine', -22, pan);
 }
 
-/** Ball bouncing on the court. brightness ~ surface (clay duller than grass). */
+/** Ball bouncing on the pitch. brightness ~ surface (grass duller than street). */
 export function playBounce(pan = 0, brightness = 1) {
   const v = 0.9 + Math.random() * 0.2;
   noiseBurst(0.05, 0.25, 700 * brightness * v, pan);
   tone(110 * v, 0.07, 0.22, 'sine', -40, pan);
 }
 
-/** Point decided. */
-export function playPoint(won: boolean) {
+/** Studs-first slide across the turf. */
+export function playSlide(pan = 0) {
+  sweep(0.42, 0.22, 'bandpass', 1500, 260, 0.9, 1.4, pan);
+  tone(80, 0.16, 0.22, 'sine', -30, pan);
+}
+
+/** GOAL! Stadium horn under the roar — the renderer fires the crowd itself. */
+export function playGoal() {
+  // air horn: two detuned saws holding, then a triumphant lift
+  tone(196, 0.55, 0.16, 'sawtooth', 0);
+  tone(294, 0.55, 0.12, 'sawtooth', 0);
+  tone(392, 0.7, 0.14, 'sawtooth', 0, 0, 0.18);
+  tone(784, 0.4, 0.07, 'sine', 0, 0, 0.34);
+  noiseBurst(0.12, 0.2, 2200);
+}
+
+/** Result jingle when a goal lands — won: yours, else theirs. */
+export function playGoalJingle(won: boolean) {
   if (won) {
     tone(523, 0.11, 0.22, 'triangle');
     tone(659, 0.11, 0.22, 'triangle', 0, 0, 0.09);
@@ -490,13 +506,18 @@ export function playPoint(won: boolean) {
   }
 }
 
-/** Air on a swing that found no ball. */
+/** Air on a kick that found no ball. */
 export function playWhoosh(power = 0.5) {
   sweep(0.22, 0.08 + power * 0.14, 'bandpass', 350, 1300, 0.45, 2);
 }
 
-/** Soft flick of the ball going up for the serve. */
-export function playToss() {
+/** Referee's whistle — kickoff, half-time, full time. */
+export function playWhistle() {
+  whistle(0);
+}
+
+/** Soft UI blip (settings auditions, menu feedback). */
+export function playBlip() {
   noiseBurst(0.04, 0.1, 500);
   tone(480, 0.07, 0.06, 'sine', 70);
 }
@@ -512,29 +533,7 @@ export function playGo() {
   tone(880, 0.16, 0.2, 'square', 0, 0, 0.08);
 }
 
-/** Momentum meter full — the finisher is armed. */
-export function playCharge() {
-  tone(220, 0.32, 0.12, 'sawtooth', 660); // rising snarl up an octave x2
-  tone(1760, 0.14, 0.08, 'sine', 0, 0, 0.3); // arrival sparkle
-  tone(2217, 0.18, 0.06, 'sine', 0, 0, 0.36);
-}
-
-/** Screw-shot launch: detonation under the racket crack. */
-export function playScrew(pan = 0) {
-  playHit(1, pan);
-  sweep(0.5, 0.3, 'lowpass', 900, 90, 0.1, 1, pan); // boom rolling off
-  tone(1400, 0.4, 0.12, 'sawtooth', -1250, pan); // falling zap
-  tone(60, 0.35, 0.25, 'sine', -20, pan); // sub rumble
-}
-
-/** Ball into the net: dull tape thud + twang. */
-export function playNetCord() {
-  noiseBurst(0.06, 0.35, 260);
-  tone(85, 0.14, 0.35, 'sine', -35);
-  tone(320, 0.06, 0.1, 'triangle', -160, 0, 0.02);
-}
-
-/** Target practice: bullseye rings like a bell. */
+/** Bright ring — a bet paying out, a level-up. */
 export function playDing() {
   noiseBurst(0.02, 0.15, 4000);
   tone(1319, 0.4, 0.14, 'sine');
@@ -542,19 +541,11 @@ export function playDing() {
   tone(2637, 0.5, 0.05, 'sine', 0, 0, 0.02);
 }
 
-/** Beer pong: ball lands in a cup. */
-export function playSplash() {
-  sweep(0.4, 0.3, 'lowpass', 1500, 220, 0.15);
-  // droplets hopping out of the cup
-  for (let i = 0; i < 3; i++) {
-    tone(650 + Math.random() * 350, 0.07, 0.07, 'sine', 220, 0, 0.08 + i * 0.07);
-  }
-}
-
-/** A body hitting the court — dive landings. */
-export function playDiveLand(pan = 0) {
-  noiseBurst(0.08, 0.4, 350, pan);
-  tone(65, 0.15, 0.3, 'sine', -20, pan);
+/** Ball off the woodwork. */
+export function playPost() {
+  noiseBurst(0.04, 0.4, 1800);
+  tone(420, 0.35, 0.22, 'sine', -120);
+  tone(1240, 0.2, 0.07, 'sine', -300);
 }
 
 /** Emote bubble pop. */

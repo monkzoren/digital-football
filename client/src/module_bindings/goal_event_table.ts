@@ -13,9 +13,11 @@ import {
 export default __t.row({
   id: __t.u64().primaryKey(),
   matchId: __t.u64().name("match_id"),
+  lobbyId: __t.u64().name("lobby_id"),
   side: __t.u8(),
-  x: __t.f32(),
-  y: __t.f32(),
-  radius: __t.f32(),
-  alive: __t.bool(),
+  scorerName: __t.string().name("scorer_name"),
+  ownGoal: __t.bool().name("own_goal"),
+  half: __t.u8(),
+  clockSecs: __t.u16().name("clock_secs"),
+  at: __t.timestamp(),
 });

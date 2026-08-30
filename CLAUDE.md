@@ -1,32 +1,53 @@
 # Digital Football — project notes
 
-Arcade 5-a-side football, seeded from digital-tennis (see the status note
-in README.md; design + milestones in DIGITAL_FOOTBALL_PLAN.md). Until M1
-lands, the code below is still the inherited tennis build — these notes
-describe what's in the tree today. Key facts:
+Arcade 5-a-side football (design + milestones in DIGITAL_FOOTBALL_PLAN.md).
+Seeded from digital-tennis and then rewritten for the sport: the tennis
+gameplay is gone, the sport-agnostic meta layer (rooms, accounts, reconnect,
+tournaments, betting, chat, graphics) carried over. Key facts:
 
 - `spacetimedb/src/index.ts` — single-file module: schema + reducers + the
-  20 Hz `game_tick` scheduled reducer (server-authoritative physics/scoring).
-- `client/` — Vite + TS canvas client. `src/render.ts` is the pseudo-3D
-  renderer; `src/main.ts` owns connection, input, and UI state.
+  30 Hz `game_tick` scheduled reducer (server-authoritative physics/scoring).
+- `client/` — Vite + TS app. `src/render.ts` is the Three.js renderer;
+  `src/main.ts` owns connection, input, and UI state.
 - After editing the module: `spacetime publish -y` then regenerate bindings:
   `spacetime generate --lang typescript --out-dir client/src/module_bindings --module-path spacetimedb -y`
-- Court geometry constants are duplicated in `spacetimedb/src/index.ts` and
-  `client/src/config.ts` — keep in sync.
-- Tournament betting lives in those same two files: the `wallet`/`bet`/`book`
-  tables + `place_bet` in the module, the BETS panel and courtside bar in
+- Pitch geometry constants are duplicated in `spacetimedb/src/index.ts` and
+  `client/src/config.ts` — keep in sync. Same for the match format
+  (HALF_SECONDS / OT_SECONDS), the phase and restart-kind enums, and the
+  progression curve.
+- **The football, specifically:**
+  - One human controls ONE outfielder. Every side gets a bot keeper
+    (`role = ROLE_KEEPER`), spawned in `goLive` and deleted in
+    `endMatchCleanup` — keepers are per-match, not per-room.
+  - Possession is a real model: the ball sticks to `ball.ownerId` inside a
+    control radius and is knocked ahead of their run. A struck ball sets
+    `ball.lockTicks`, which locks out `ball.lastTouchId` — WITHOUT that the
+    kicker's own control radius swallows the shot on the next tick and
+    nothing ever leaves a boot. Any other player's touch clears the lock.
+  - Out-of-play is judged AFTER possession, on where the ball IS
+    (`resolveOutOfPlay`), not only on the tick it crosses a line — otherwise
+    a dribbler simply walks it out of the world.
+  - A forward kick inside `SHOOT_RANGE` is re-aimed at the goal mouth
+    (`executeKick`'s `shootAssist`). Without it, eight-way aim cannot hit a
+    fourteen-foot goal from an angle and the game is unplayable.
+  - The keeper commits to a save only inside its level's `react` window and
+    with an `err` offset. A keeper that reads the whole flight is unbeatable
+    from range; `KEEPER_CLEAR_RADIUS` is what it can actually glove.
+- Betting lives in the same two files: the `wallet`/`bet`/`book` tables +
+  `place_bet` in the module, the BETS panel and pitchside bar in
   `client/src/main.ts`. Odds are server-authoritative — the client only
-  renders `book` rows and locks its price from them.
-- Player accounts live in the same two files: the `account` / `match_log` /
-  `session` tables + `awardProgression` in the module, the profile card,
-  account chip, halt overlay and ESC match menu in `client/src/main.ts`, and
-  Firebase in `client/src/auth.ts`. `account` is the ONLY persistent table
-  here — everything else dies with its room — so its columns are append-only
-  and `publish.sh` refuses `--clear-database` without `ALLOW_CLEAR=1`.
+  renders `book` rows and locks its price from them. The odds prior reads
+  goal share.
+- Player accounts live in those two files plus `client/src/auth.ts`
+  (Firebase). `account` is the ONLY persistent table here — everything else
+  dies with its room — so its columns are append-only and `publish.sh`
+  refuses `--clear-database` without `ALLOW_CLEAR=1`. A column added to any
+  other table still needs a `.default(...)` or the publish is rejected as a
+  breaking change.
 - Progression is awarded in `finishMatch`, which captures the roster BEFORE
   `endMatchCleanup` zeroes `matchId`. Award after it and every match silently
   pays out nothing.
-- Two browser tabs are ONE player now (shared Firebase/localStorage session).
+- Two browser tabs are ONE player (shared Firebase/localStorage session).
   For local 2-player testing use two browser profiles, or `?seat=2` on the
   no-Firebase fallback path.
 - Local server is `spacetime start` (CLI 2.8.x); DB name `digital-football`.

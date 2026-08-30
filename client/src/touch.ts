@@ -1,4 +1,5 @@
-// Touch controls: a floating 8-way stick on the left, HIT/LOB on the right.
+// Touch controls: a floating 8-way stick on the left, KICK/CHIP/SLIDE on the
+// right, plus a SPRINT toggle.
 //
 // The stick is *floating* — it appears wherever the thumb lands inside the
 // left zone rather than at a fixed spot, which is what makes it playable
@@ -7,8 +8,9 @@
 // (see sendDir in main.ts); analog magnitude would be thrown away.
 
 type Handlers = {
-  swing: (kind: number) => void;
-  swingRelease: () => void;
+  kick: (kind: number) => void;
+  kickRelease: () => void;
+  tackle: () => void;
   chat: () => void;
 };
 
@@ -27,7 +29,7 @@ let dir: [number, number] = [0, 0];
 
 // How far the knob travels, as a fraction of the stick's rendered diameter,
 // and how far past centre counts as a direction. The stick is sized in CSS
-// (cqmin, so it scales with the court), hence radius is measured, not fixed.
+// (cqmin, so it scales with the pitch), hence radius is measured, not fixed.
 const TRAVEL = 0.4;
 const DEADZONE = 0.38; // fraction of the travel radius
 let radius = 46;
@@ -56,7 +58,11 @@ export function setTouchVisible(visible: boolean) {
   shown = show;
   root.classList.toggle('hidden', !show);
   document.body.classList.toggle('touch-playing', show);
-  if (!show) releaseStick();
+  if (!show) {
+    releaseStick();
+    sprinting = false;
+    sprintEl?.classList.remove('pressed');
+  }
 }
 
 function releaseStick() {
@@ -92,7 +98,7 @@ function initStick() {
     home.classList.add('hidden');
     const half = (stick.offsetWidth || 116) / 2;
     radius = half * 2 * TRAVEL;
-    // Keep the ring inside the court even when the thumb lands on the very
+    // Keep the ring inside the pitch even when the thumb lands on the very
     // edge — the origin moves with it, so the knob still reads true.
     const clamp = (v: number, max: number) => Math.min(Math.max(v, half), Math.max(half, max - half));
     const localX = clamp(e.clientX - rect.left, rect.width);
@@ -120,7 +126,7 @@ function initStick() {
 
 // Each action button tracks its own pointer id so a second finger on the
 // other button can't cancel the first one's hold — hold length is what the
-// server reads as swing power.
+// server reads as kick power.
 const releasers: Array<() => void> = [];
 
 function initButton(el: HTMLElement, onDown: () => void, onUp: () => void) {
@@ -149,6 +155,26 @@ function initButton(el: HTMLElement, onDown: () => void, onUp: () => void) {
   }
 }
 
+// SPRINT is a latch, not a hold: a thumb already busy with the stick and the
+// kick buttons has none left to keep a fourth one pressed. main.ts reads it
+// every frame and folds it into setInput.
+let sprinting = false;
+let sprintEl: HTMLElement | null = null;
+
+/** Is the touch SPRINT latch on? */
+export function touchSprint(): boolean {
+  return sprinting;
+}
+
+function initSprint(el: HTMLElement) {
+  sprintEl = el;
+  el.addEventListener('pointerdown', e => {
+    sprinting = !sprinting;
+    el.classList.toggle('pressed', sprinting);
+    e.preventDefault();
+  });
+}
+
 export function initTouch(h: Handlers) {
   root = $('touch-controls');
   stick = $('touch-stick');
@@ -156,8 +182,11 @@ export function initTouch(h: Handlers) {
   home = $('touch-home');
 
   initStick();
-  initButton($('touch-hit'), () => h.swing(0), h.swingRelease);
-  initButton($('touch-lob'), () => h.swing(1), h.swingRelease);
+  initButton($('touch-kick'), () => h.kick(0), h.kickRelease);
+  initButton($('touch-chip'), () => h.kick(1), h.kickRelease);
+  // A slide is a one-shot lunge — there is nothing to release.
+  initButton($('touch-slide'), h.tackle, () => {});
+  initSprint($('touch-sprint'));
   $('touch-chat').addEventListener('click', e => {
     e.preventDefault();
     h.chat();
@@ -176,11 +205,13 @@ export function initTouch(h: Handlers) {
     );
   }
 
-  // Losing the window mid-swing would otherwise leave the swing held down.
+  // Losing the window mid-kick would otherwise leave the kick held down.
   // Only buttons actually held report a release, so we never fire a reducer
   // on a connection with nothing in flight.
   window.addEventListener('blur', () => {
     releaseStick();
+    sprinting = false;
+    sprintEl?.classList.remove('pressed');
     for (const release of releasers) release();
   });
 }
