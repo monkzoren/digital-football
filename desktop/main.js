@@ -1,17 +1,17 @@
-// Digital Tennis desktop wrapper.
+// Digital Football desktop wrapper.
 //
 // The whole point of this exe is GPU rendering for people who keep hardware
 // acceleration disabled in their browser: Electron's bundled Chromium has its
 // own GPU settings, so the game's WebGL renderer always gets the real GPU.
 //
-// It also owns the digitaltennis:// protocol, so lobby invite pages opened in
+// It also owns the digitalfootball:// protocol, so lobby invite pages opened in
 // a browser can launch the installed app straight into the lobby.
 const { app, BrowserWindow, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
 const DEFAULT_URL = 'https://tennis.dcz.app';
-const PROTOCOL = 'digitaltennis';
+const PROTOCOL = 'digitalfootball';
 // CI stamps the GitHub release tag this exe was built for into release.json
 // (see .github/workflows/desktop-release.yml); local/dev builds have none.
 let releaseTag = 'dev';
@@ -21,7 +21,7 @@ try {
 // The invite page skips its "open in app" redirect when it sees this tag,
 // and the site compares the release tag against the repo's latest release
 // to tell outdated exes to update (client/src/update-check.ts).
-const UA_TAG = `DigitalTennisDesktop/${releaseTag}`;
+const UA_TAG = `DigitalFootballDesktop/${releaseTag}`;
 
 // GPU rasterization even for devices on Chromium's software-fallback list.
 app.commandLine.appendSwitch('ignore-gpu-blocklist');
@@ -41,7 +41,7 @@ function baseUrl() {
   }
 }
 
-// digitaltennis://join?lobby=CODE  →  https://tennis.dcz.app/?lobby=CODE
+// digitalfootball://join?lobby=CODE  →  https://tennis.dcz.app/?lobby=CODE
 function deepLinkToGameUrl(argv) {
   const link = argv.find((a) => a.startsWith(`${PROTOCOL}://`));
   if (!link) return null;
@@ -65,7 +65,7 @@ function createWindow(startUrl) {
     height: 720,
     backgroundColor: '#0a0a14',
     autoHideMenuBar: true,
-    title: 'Digital Tennis',
+    title: 'Digital Football',
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,

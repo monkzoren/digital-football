@@ -111,7 +111,7 @@ Three consequences worth stating plainly:
 ```ts
 // Set once, when the Firebase project is created. The module runs in a wasm
 // sandbox with no env access, so this is a source constant by necessity.
-const FIREBASE_PROJECT = 'digital-tennis';
+const FIREBASE_PROJECT = 'digital-football';
 const FIREBASE_ISSUER = `https://securetoken.google.com/${FIREBASE_PROJECT}`;
 
 const PROV_NONE = 0;   // raw SpacetimeDB token (local dev, legacy client)
@@ -672,7 +672,7 @@ onChange(cb)          // identity changed → reconnect the SpacetimeDB socket
 
 `signIn` handles the one genuinely awkward case: `linkWithPopup` throws
 `auth/credential-already-in-use` when that Google account is already a
-Digital Tennis account. Fall back to `signInWithPopup` (switch to the existing
+Digital Football account. Fall back to `signInWithPopup` (switch to the existing
 account) behind a dialog that says plainly that the guest progress on this
 device stays with the guest profile. Merging two accounts is a non-goal (§13).
 
@@ -680,7 +680,7 @@ device stays with the guest profile. Merging two accounts is a non-goal (§13).
 anonymous SpacetimeDB token — but move it from `sessionStorage` to
 `localStorage`, or reconnect cannot work at all. To preserve the two-tab local
 QA flow that shared storage would break, namespace the key by a `?seat=N`
-URL param: `dt_token` / `dt_token:2`.
+URL param: `df_token` / `df_token:2`.
 
 ### 9.2 Connection (`client/src/main.ts:241`)
 
@@ -755,7 +755,7 @@ Required changes, before the account table ships:
 2. Document the append-only rule for `account` in `CLAUDE.md`, next to the
    existing court-geometry note.
 3. Ship a backup one-liner in the README and run it before risky publishes:
-   `spacetime sql digital-tennis "SELECT * FROM account" > accounts.bak`
+   `spacetime sql digital-football "SELECT * FROM account" > accounts.bak`
 
 ---
 

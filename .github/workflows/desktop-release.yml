@@ -49,10 +49,10 @@ jobs:
       # Always available as a workflow artifact (including manual runs)
       - uses: actions/upload-artifact@v4
         with:
-          name: DigitalTennis-windows
+          name: DigitalFootball-windows
           path: |
-            desktop/dist/DigitalTennis-Setup.exe
-            desktop/dist/DigitalTennis.exe
+            desktop/dist/DigitalFootball-Setup.exe
+            desktop/dist/DigitalFootball.exe
 
       # Attach the exes to the release: fires for v* tag pushes, any published
       # release (any tag name), or a manual run given a release_tag.
@@ -61,6 +61,6 @@ jobs:
         with:
           tag_name: ${{ inputs.release_tag || github.ref_name }}
           files: |
-            desktop/dist/DigitalTennis-Setup.exe
-            desktop/dist/DigitalTennis.exe
+            desktop/dist/DigitalFootball-Setup.exe
+            desktop/dist/DigitalFootball.exe
           generate_release_notes: true

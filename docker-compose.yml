@@ -40,7 +40,7 @@ services:
       - spacetimedb
     environment:
       SPACETIMEDB_URL: http://spacetimedb:3000
-      DATABASE_NAME: ${DATABASE_NAME:-digital-tennis}
+      DATABASE_NAME: ${DATABASE_NAME:-digital-football}
       # Optional override: publish as a specific identity (an owner's token).
       # Normally leave empty — the publisher mints a deterministic owner
       # token from the server's signing key (see volumes below).
@@ -67,7 +67,7 @@ services:
     build:
       context: ./client
       args:
-        VITE_DATABASE_NAME: ${DATABASE_NAME:-digital-tennis}
+        VITE_DATABASE_NAME: ${DATABASE_NAME:-digital-football}
         # Firebase web config — public values, baked at build time. Leave
         # them empty and the client falls back to anonymous SpacetimeDB
         # identities (progress still works, but only on this browser).

@@ -7,16 +7,16 @@
 //     reload: a banner mid-match would be rude enough already.
 //
 //  2. STALE DESKTOP EXE — CI stamps the GitHub release tag into each exe and
-//     the wrapper reports it in the user agent (DigitalTennisDesktop/<tag>).
+//     the wrapper reports it in the user agent (DigitalFootballDesktop/<tag>).
 //     The latest release IS the current version, so we ask GitHub for its
 //     tag and flag any exe carrying a different one.
 
 declare const __BUILD_ID__: string;
 
 const LATEST_RELEASE_API =
-  'https://api.github.com/repos/monkzoren/digital-tennis/releases/latest';
+  'https://api.github.com/repos/monkzoren/digital-football/releases/latest';
 const DESKTOP_DOWNLOAD_URL =
-  'https://github.com/monkzoren/digital-tennis/releases/latest/download/DigitalTennis-Setup.exe';
+  'https://github.com/monkzoren/digital-football/releases/latest/download/DigitalFootball-Setup.exe';
 
 const POLL_MS = 5 * 60_000;
 
@@ -64,7 +64,7 @@ async function checkBuild() {
     const { buildId } = await res.json();
     if (buildId && buildId !== __BUILD_ID__) {
       newBuildSeen = true;
-      showBanner('A new version of Digital Tennis is live', 'REFRESH', null, () => {
+      showBanner('A new version of Digital Football is live', 'REFRESH', null, () => {
         location.reload();
       });
     }
@@ -84,7 +84,7 @@ if (!(import.meta as any).env?.DEV) {
 
 // The exe's UA carries the release tag it was built for ('dev' for local
 // builds, a bare '1.0' for pre-stamping exes — those correctly mismatch).
-const uaMatch = navigator.userAgent.match(/DigitalTennisDesktop\/(\S+)/);
+const uaMatch = navigator.userAgent.match(/DigitalFootballDesktop\/(\S+)/);
 const exeTag = uaMatch?.[1];
 if (exeTag && exeTag !== 'dev') {
   void (async () => {

@@ -7,7 +7,7 @@ COPY src ./src
 # Empty = same-origin (nginx proxies /v1 to SpacetimeDB) — the right
 # default for every containerized deployment.
 ARG VITE_SPACETIMEDB_URI=
-ARG VITE_DATABASE_NAME=digital-tennis
+ARG VITE_DATABASE_NAME=digital-football
 # Firebase web config. All four are PUBLIC values (they identify the project,
 # they don't authorize anything), so baking them into the bundle is how
 # Firebase is meant to be used. Leave them empty to run without accounts.

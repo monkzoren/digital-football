@@ -1,7 +1,9 @@
-# Digital Tennis — project notes
+# Digital Football — project notes
 
-Virtua Tennis-style online tennis. See README.md for architecture and run
-instructions. Key facts:
+Arcade 5-a-side football, seeded from digital-tennis (see the status note
+in README.md; design + milestones in DIGITAL_FOOTBALL_PLAN.md). Until M1
+lands, the code below is still the inherited tennis build — these notes
+describe what's in the tree today. Key facts:
 
 - `spacetimedb/src/index.ts` — single-file module: schema + reducers + the
   20 Hz `game_tick` scheduled reducer (server-authoritative physics/scoring).
@@ -27,7 +29,7 @@ instructions. Key facts:
 - Two browser tabs are ONE player now (shared Firebase/localStorage session).
   For local 2-player testing use two browser profiles, or `?seat=2` on the
   no-Firebase fallback path.
-- Local server is `spacetime start` (CLI 2.8.x); DB name `digital-tennis`.
+- Local server is `spacetime start` (CLI 2.8.x); DB name `digital-football`.
 - The module entrypoint may ONLY export SpacetimeDB constructs (reducers,
   schema default) — exporting plain constants breaks publish.
 

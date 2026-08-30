@@ -316,7 +316,7 @@ async function connect() {
     })
     .onConnect((_c, identity, token) => {
       if (gen !== connectGen) return; // superseded while the socket opened
-      console.log('[dt] connected as', identity.toHexString());
+      console.log('[df] connected as', identity.toHexString());
       connectFailures = 0;
       reconnecting = false;
       myIdentity = identity;
@@ -331,12 +331,12 @@ async function connect() {
         conn
           .subscriptionBuilder()
           .onApplied(() => {
-            console.log('[dt] subscription applied');
+            console.log('[df] subscription applied');
             subscribed = true;
             onSubscribed();
           })
           .onError(e => {
-            console.error('[dt] subscription error', e);
+            console.error('[df] subscription error', e);
             setStatus('SUBSCRIPTION ERROR — SERVER/CLIENT VERSION MISMATCH?');
           })
           .subscribe([
@@ -356,13 +356,13 @@ async function connect() {
             'SELECT * FROM my_match_log',
           ]);
       } catch (err) {
-        console.error('[dt] subscribe threw', err);
+        console.error('[df] subscribe threw', err);
       }
     })
     .onConnectError((_c, err) => {
       if (gen !== connectGen) return;
       connectFailures++;
-      console.error('[dt] connect error', err, `(attempt ${connectFailures})`);
+      console.error('[df] connect error', err, `(attempt ${connectFailures})`);
       const rejected = /verify token|unauthorized|401/i.test(String((err as any)?.message ?? err));
       let hint = reconnecting ? 'RECONNECTING...' : 'IS THE SERVER RUNNING?';
       // Only the fallback path can hold a dead token: it is signed by the
@@ -371,7 +371,7 @@ async function connect() {
       // iss+sub and survives any re-key, so there is nothing to reset.
       if (!firebaseEnabled && (rejected || connectFailures >= 2) && localToken.get()) {
         localToken.clear();
-        console.warn('[dt] stored token rejected — reconnecting anonymously');
+        console.warn('[df] stored token rejected — reconnecting anonymously');
         hint = 'RESETTING SESSION...';
       }
       showOverlay('connecting');
@@ -605,11 +605,11 @@ function setStatus(msg: string) {
 }
 
 function playerName(): string {
-  const name = (localStorage.getItem('dt_name') || nameInput.value || 'GUEST')
+  const name = (localStorage.getItem('df_name') || nameInput.value || 'GUEST')
     .trim()
     .toUpperCase()
     .slice(0, 16);
-  localStorage.setItem('dt_name', name);
+  localStorage.setItem('df_name', name);
   return name || 'GUEST';
 }
 
@@ -621,7 +621,7 @@ const nameModal = $('name-modal');
 let afterName: (() => void) | null = null;
 
 function storedName(): string {
-  return (localStorage.getItem('dt_name') ?? '').trim();
+  return (localStorage.getItem('df_name') ?? '').trim();
 }
 
 function refreshNameTag() {
@@ -856,7 +856,7 @@ function confirmName() {
     nameInput.focus();
     return;
   }
-  localStorage.setItem('dt_name', name);
+  localStorage.setItem('df_name', name);
   refreshNameTag();
   // already in a lobby (name edited mid-session): push it to the server now
   if (getMyPlayer()) conn.reducers.setName({ name });
@@ -878,13 +878,13 @@ let pendingCode = '';
 // the live match a spectator asked for; the view follows it until it ends,
 // then falls back to whatever else is running in the room
 let spectateMatchId: bigint | null = null;
-let selectedChar = Math.min(CHARACTERS.length - 1, Number(localStorage.getItem('dt_char') ?? 0) || 0);
+let selectedChar = Math.min(CHARACTERS.length - 1, Number(localStorage.getItem('df_char') ?? 0) || 0);
 let selectedCourt = 0;
 let selectedConcurrent = 2;
-let selectedFormat = Math.min(1, Number(localStorage.getItem('dt_format') ?? 0) || 0);
-let selectedBotLevel = Math.min(2, Number(localStorage.getItem('dt_bot') ?? 1) || 0);
+let selectedFormat = Math.min(1, Number(localStorage.getItem('df_format') ?? 0) || 0);
+let selectedBotLevel = Math.min(2, Number(localStorage.getItem('df_bot') ?? 1) || 0);
 let selectedPublic = true;
-let selectedTeamSize = Math.min(3, Number(localStorage.getItem('dt_team') ?? 1) || 1);
+let selectedTeamSize = Math.min(3, Number(localStorage.getItem('df_team') ?? 1) || 1);
 
 const VISIBILITY_OPTIONS = [
   { id: 1, name: 'PUBLIC', desc: 'ANYONE CAN JOIN FROM THE MENU' },
@@ -919,7 +919,7 @@ const PHYS_PRESETS: { name: string; v: [number, number, number, number] }[] = [
 ];
 const physValues: Record<PhysSlider['key'], number> = (() => {
   try {
-    const saved = JSON.parse(localStorage.getItem('dt_phys') ?? '{}');
+    const saved = JSON.parse(localStorage.getItem('df_phys') ?? '{}');
     return {
       gravityMul: Number(saved.gravityMul) || 100,
       dragMul: Number.isFinite(Number(saved.dragMul)) ? Number(saved.dragMul) : 0,
@@ -932,7 +932,7 @@ const physValues: Record<PhysSlider['key'], number> = (() => {
 })();
 
 function physPayload() {
-  localStorage.setItem('dt_phys', JSON.stringify(physValues));
+  localStorage.setItem('df_phys', JSON.stringify(physValues));
   return {
     gravityMul: physValues.gravityMul / 100,
     dragMul: physValues.dragMul / 100,
@@ -1018,7 +1018,7 @@ function buildSelectGrids() {
     card.innerHTML = `<div class="cname">${f.name}</div>`;
     card.addEventListener('click', () => {
       selectedFormat = f.id;
-      localStorage.setItem('dt_format', String(f.id));
+      localStorage.setItem('df_format', String(f.id));
       refreshSelection();
     });
     formatGrid.appendChild(card);
@@ -1045,7 +1045,7 @@ function buildSelectGrids() {
     card.innerHTML = `<div class="cname">${opt.id === 2 ? '👥' : '🎾'} ${opt.name}</div>`;
     card.addEventListener('click', () => {
       selectedTeamSize = opt.id;
-      localStorage.setItem('dt_team', String(opt.id));
+      localStorage.setItem('df_team', String(opt.id));
       refreshSelection();
     });
     teamGrid.appendChild(card);
@@ -1059,7 +1059,7 @@ function buildSelectGrids() {
     card.innerHTML = `<div class="cname"><span class="tier-dot t${lvl.id}"></span>${lvl.name}</div>`;
     card.addEventListener('click', () => {
       selectedBotLevel = lvl.id;
-      localStorage.setItem('dt_bot', String(lvl.id));
+      localStorage.setItem('df_bot', String(lvl.id));
       refreshSelection();
     });
     diffGrid.appendChild(card);
@@ -1192,7 +1192,7 @@ $('char-back').addEventListener('click', () => {
   showOverlay('menu');
 });
 $('char-confirm').addEventListener('click', () => {
-  localStorage.setItem('dt_char', String(selectedChar));
+  localStorage.setItem('df_char', String(selectedChar));
   conn.reducers.setName({ name: playerName() });
   conn.reducers.setCharacter({ characterId: selectedChar });
   if (pendingAction === 'join') {

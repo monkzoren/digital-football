@@ -1,8 +1,8 @@
 {
-  "name": "digital-tennis-desktop",
-  "productName": "Digital Tennis",
+  "name": "digital-football-desktop",
+  "productName": "Digital Football",
   "version": "1.0.1",
-  "description": "Desktop client for Digital Tennis — GPU-accelerated regardless of browser settings",
+  "description": "Desktop client for Digital Football — GPU-accelerated regardless of browser settings",
   "private": true,
   "main": "main.js",
   "scripts": {
@@ -14,17 +14,17 @@
     "electron-builder": "^26.0.0"
   },
   "build": {
-    "appId": "com.digitaltennis.desktop",
-    "productName": "DigitalTennis",
+    "appId": "com.digitalfootball.desktop",
+    "productName": "DigitalFootball",
     "files": [
       "main.js",
       "release.json"
     ],
     "protocols": [
       {
-        "name": "Digital Tennis",
+        "name": "Digital Football",
         "schemes": [
-          "digitaltennis"
+          "digitalfootball"
         ]
       }
     ],
@@ -37,11 +37,11 @@
     },
     "nsis": {
       "oneClick": true,
-      "artifactName": "DigitalTennis-Setup.exe",
+      "artifactName": "DigitalFootball-Setup.exe",
       "runAfterFinish": true
     },
     "portable": {
-      "artifactName": "DigitalTennis.exe"
+      "artifactName": "DigitalFootball.exe"
     }
   }
 }

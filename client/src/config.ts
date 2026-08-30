@@ -15,12 +15,12 @@ const envPointsLocal = !!envUri && /\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)
 const usableEnvUri = envUri && !(envPointsLocal && !pageIsLocal) ? envUri : undefined;
 if (envUri && !usableEnvUri) {
   console.warn(
-    `[dt] Ignoring VITE_SPACETIMEDB_URI="${envUri}" (localhost is unreachable for remote players); using same-origin instead.`
+    `[df] Ignoring VITE_SPACETIMEDB_URI="${envUri}" (localhost is unreachable for remote players); using same-origin instead.`
   );
 }
 export const SPACETIMEDB_URI = usableEnvUri ?? defaultUri;
 export const DATABASE_NAME =
-  (import.meta as any).env?.VITE_DATABASE_NAME ?? 'digital-tennis';
+  (import.meta as any).env?.VITE_DATABASE_NAME ?? 'digital-football';
 
 // Simulation tick rate — must mirror TICK_HZ in spacetimedb/src/index.ts.
 // Only used to convert server tick counts into seconds for the UI; the ball

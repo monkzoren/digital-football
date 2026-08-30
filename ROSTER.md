@@ -1,4 +1,4 @@
-# Digital Tennis — character roster
+# Digital Football — character roster
 
 Every character's stat pips sum to 18 (see `client/src/characters.ts` for the
 pips, `spacetimedb/src/index.ts` `CHAR_STATS` for the real multipliers — same

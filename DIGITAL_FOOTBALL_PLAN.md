@@ -1,11 +1,11 @@
 # Digital Football — plan
 
-A spiritual sibling of Digital Tennis: a Virtua-Striker-flavored arcade
+A spiritual sibling of Digital Football: a Virtua-Striker-flavored arcade
 soccer game for the browser, living in its own repo
 (`monkzoren/digital-football`), built on the same bones — SpacetimeDB is the
 entire backend, a scheduled tick reducer runs the authoritative simulation,
 and a Vite + TypeScript Three.js client renders it with a TV camera. This
-document is the plan; nothing here ships into digital-tennis.
+document is the plan; nothing here ships into digital-football.
 
 ## Vision
 
@@ -15,13 +15,13 @@ team), teams of 1–3 humans with server-side bots filling the rest of a
 5-a-side lineup plus an automated goalkeeper. Matches are short and loud:
 two 3-minute halves (or first-to-N goals in casual rooms), golden-goal
 overtime, crowd, replays-free instant restarts. Everything social that made
-Digital Tennis fun carries over wholesale: lobby codes and public lobby
+Digital Football fun carries over wholesale: lobby codes and public lobby
 browser, spectating, tournaments with brackets and bot fill-ins, tournament
 betting, accounts/XP/MMR, chat and emotes.
 
 ## What transfers vs. what's new
 
-Digital Tennis was deliberately built as "rooms + matches + a scheduled
+Digital Football was deliberately built as "rooms + matches + a scheduled
 tick"; almost all of the meta layer is sport-agnostic. Honest split:
 
 **Transfers nearly verbatim (copy, rename, keep):**
@@ -146,7 +146,7 @@ tick"; almost all of the meta layer is sport-agnostic. Honest split:
 
 ## Architecture
 
-Identical shape to digital-tennis, new sport plugged into the middle:
+Identical shape to digital-football, new sport plugged into the middle:
 
 ```
 client/  (Vite + TS, Three.js)           spacetimedb/  (TypeScript module)
@@ -219,19 +219,19 @@ roster also leaves the door open to cross-game identity later.
 ## Repo bootstrap strategy
 
 **Copy, don't fork-and-track.** Create `monkzoren/digital-football` as a
-fresh repo seeded from a copy of digital-tennis at a known commit, then
+fresh repo seeded from a copy of digital-football at a known commit, then
 diverge freely:
 
 1. New GitHub repo `digital-football` (no fork relationship — the games
    will diverge fast and PRs across them make no sense).
-2. Copy the tree; global rename `digital-tennis` → `digital-football`
+2. Copy the tree; global rename `digital-football` → `digital-football`
    (`spacetime.json`, `docker-compose.yml`, `config.ts` DB name, docs,
    localStorage keys `dt_*` → `df_*`).
 3. Delete tennis-only content up front (beer pong, target practice, tennis
    scoring, serve logic, court rendering) rather than letting it rot —
    commit 1 should *build and publish* a walking skeleton: lobby → join →
    two capsules on a green rectangle pushing a ball, no rules.
-4. Record the seed commit hash of digital-tennis in the new README, so
+4. Record the seed commit hash of digital-football in the new README, so
    later fixes there (e.g., to the reconnect or publisher-identity
    machinery) can be cherry-picked by hand.
 5. Port CLAUDE.md with the football table above so the same guardrails

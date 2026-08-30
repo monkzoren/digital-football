@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 SERVER_URL="${SPACETIMEDB_URL:-http://spacetimedb:3000}"
-DB_NAME="${DATABASE_NAME:-digital-tennis}"
+DB_NAME="${DATABASE_NAME:-digital-football}"
 # The server's token-signing key, shared read-only via the spacetimedb-data
 # volume (the server writes it there on first boot — see docker-compose.yml).
 SERVER_KEY="${SERVER_KEY:-/stdb/keys/id_ecdsa}"
@@ -9,7 +9,7 @@ SERVER_KEY="${SERVER_KEY:-/stdb/keys/id_ecdsa}"
 # token minted with these claims is the SAME identity — the database owner —
 # on every deploy. Don't change them once a database exists, or the publisher
 # becomes a different identity that doesn't own it.
-MINT_ISSUER="digital-tennis-publisher"
+MINT_ISSUER="digital-football-publisher"
 
 echo "Waiting for SpacetimeDB at $SERVER_URL ..."
 until curl -sf "$SERVER_URL/v1/ping" > /dev/null 2>&1; do

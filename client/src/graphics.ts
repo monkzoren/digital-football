@@ -55,7 +55,7 @@ export const PRESETS: Record<PresetName, GraphicsSettings> = {
 export const RESOLUTIONS = [1, 0.75, 0.5];
 export const FPS_CAPS = [0, 120, 60, 30];
 
-const STORE_KEY = 'dt_gfx';
+const STORE_KEY = 'df_gfx';
 
 // Default a notch down unless the machine is clearly beefy — every option is
 // still one click away, this only picks where the slider starts. MEDIUM keeps

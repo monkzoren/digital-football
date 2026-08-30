@@ -64,7 +64,7 @@ export type AccountKind = 'guest' | 'linked' | 'local' | 'offline';
  *  localStorage), so they are ONE player. `?seat=2` namespaces the fallback
  *  token key to keep the old two-tabs-two-players test flow working. */
 const seat = new URLSearchParams(location.search).get('seat') ?? '';
-const TOKEN_KEY = seat ? `dt_token:${seat}` : 'dt_token';
+const TOKEN_KEY = seat ? `df_token:${seat}` : 'df_token';
 
 /** The anonymous SpacetimeDB token, used only when Firebase is unconfigured.
  *  It lives in localStorage, NOT sessionStorage: an identity that dies with
@@ -123,7 +123,7 @@ export function initAuth(): Promise<void> {
             } catch (err) {
               const transient = String((err as any)?.code ?? '').includes('network-request-failed');
               if (!transient || attempt >= 2) {
-                console.error('[dt] anonymous sign-in failed', err);
+                console.error('[df] anonymous sign-in failed', err);
                 degraded = true;
                 notify();
                 if (!settled) { settled = true; resolve(); }
@@ -138,7 +138,7 @@ export function initAuth(): Promise<void> {
         notify();
       },
       err => {
-        console.error('[dt] auth error', err);
+        console.error('[df] auth error', err);
         degraded = true;
         if (!settled) { settled = true; resolve(); }
       }
@@ -149,7 +149,7 @@ export function initAuth(): Promise<void> {
     new Promise<void>(resolve =>
       setTimeout(() => {
         if (!user) {
-          console.warn('[dt] auth did not settle in time — continuing offline');
+          console.warn('[df] auth did not settle in time — continuing offline');
           degraded = true;
           notify();
         }
@@ -172,7 +172,7 @@ export async function getToken(): Promise<string | undefined> {
     try {
       return await user.getIdToken();
     } catch (err) {
-      console.error('[dt] could not mint an ID token', err);
+      console.error('[df] could not mint an ID token', err);
       degraded = true;
     }
   }
@@ -202,7 +202,7 @@ export function onAuthChange(cb: () => void) {
 
 export type SignInResult =
   | { ok: true; switched: false }
-  /** The provider was already a Digital Tennis account, so we signed into
+  /** The provider was already a Digital Football account, so we signed into
    *  THAT one instead of linking. The identity changes — the caller has to
    *  reconnect, and should say plainly that the guest progress stayed behind. */
   | { ok: true; switched: true }
@@ -306,7 +306,7 @@ export async function signInWithGoogle(): Promise<SignInResult> {
     return { ok: true, switched: false };
   } catch (err: any) {
     const code = String(err?.code ?? '');
-    // That Google account already has a Digital Tennis account of its own.
+    // That Google account already has a Digital Football account of its own.
     // Merging two identities is a non-goal, so sign into the existing one and
     // let the caller warn that this device's guest progress stays put.
     if (code === 'auth/credential-already-in-use' || code === 'auth/email-already-in-use') {
@@ -332,7 +332,7 @@ export async function signInWithGoogle(): Promise<SignInResult> {
 // load we finish the sign-in — LINKING it to the anonymous guest if there is
 // one, so the player keeps the level and rating they just earned.
 // ---------------------------------------------------------------------------
-const EMAIL_KEY = 'dt_signin_email';
+const EMAIL_KEY = 'df_signin_email';
 
 /** Where the emailed link comes back to. Must be an authorized domain in the
  *  Firebase console, or Firebase refuses to send. Query is dropped so an

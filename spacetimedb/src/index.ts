@@ -358,7 +358,7 @@ const B_LOST = 2;
 // Set this to the Firebase project id when the project is created. The module
 // runs in a wasm sandbox with no env access, so it is a source constant by
 // necessity. Only used to tell a Firebase token apart from any other issuer.
-const FIREBASE_PROJECT = 'digital-tennis';
+const FIREBASE_PROJECT = 'digital-football';
 const FIREBASE_ISSUER = `https://securetoken.google.com/${FIREBASE_PROJECT}`;
 
 const PROV_NONE = 0; // raw SpacetimeDB token (local dev, legacy client)

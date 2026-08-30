@@ -32,7 +32,7 @@ export interface AudioSettings {
 }
 
 export const VOLUME_STEPS = [0, 0.25, 0.5, 0.75, 1];
-const AUDIO_STORE_KEY = 'dt_audio';
+const AUDIO_STORE_KEY = 'df_audio';
 const AUDIO_DEFAULTS: AudioSettings = { master: 1, sfx: 1, crowd: 1 };
 
 function sanitizeAudio(raw: any): AudioSettings {

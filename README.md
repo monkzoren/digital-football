@@ -1,6 +1,19 @@
-# Digital Tennis
+# Digital Football
 
-A Virtua Tennis-style online tennis game for the browser. SpacetimeDB is the
+A Virtua-Striker-flavored arcade football game for the browser — the
+spiritual sibling of [digital-tennis](https://github.com/monkzoren/digital-tennis).
+
+> **Status: M0 seed.** This repo was seeded from `monkzoren/digital-tennis`
+> at commit `5ef728b18f84a9aef045292112daf51d92b72722` and rebranded; the
+> gameplay below is still **tennis** until milestone M1 lands. The design,
+> the tennis→football mapping, and the milestones live in
+> [`DIGITAL_FOOTBALL_PLAN.md`](DIGITAL_FOOTBALL_PLAN.md). Fixes to the
+> sport-agnostic machinery (deployment, accounts, reconnect, tournaments,
+> betting) made in digital-tennis after that commit can be cherry-picked
+> by hand.
+
+The rest of this README still describes the inherited tennis build.
+SpacetimeDB is the
 entire backend — lobbies, matchmaking-by-code, a practice bot, and the
 authoritative 20 Hz game simulation all run inside a SpacetimeDB module. The
 client is a Vite + TypeScript canvas renderer with a pseudo-3D
@@ -201,7 +214,7 @@ offers MAX / 120 / 60 / 30.
 ## Configuration
 
 - `client/src/config.ts` reads `VITE_SPACETIMEDB_URI` and
-  `VITE_DATABASE_NAME` (defaults: `ws://localhost:3000`, `digital-tennis`).
+  `VITE_DATABASE_NAME` (defaults: `ws://localhost:3000`, `digital-football`).
 - **Accounts are optional.** Set `FIREBASE_*` in `.env` (see `.env.example`)
   and `FIREBASE_PROJECT` in `spacetimedb/src/index.ts` to the same project id.
   SpacetimeDB validates Firebase ID tokens with no server configuration at
@@ -218,7 +231,7 @@ offers MAX / 120 / 60 / 30.
   append-only (SpacetimeDB auto-migrates added columns with defaults, nothing
   else), and `spacetimedb/publish.sh` refuses to clear the database unless
   `ALLOW_CLEAR=1` is set. Back up before risky publishes:
-  `spacetime sql digital-tennis "SELECT * FROM account" > accounts.bak`
+  `spacetime sql digital-football "SELECT * FROM account" > accounts.bak`
 - Court geometry constants exist in both `spacetimedb/src/index.ts` (the
   source of truth) and `client/src/config.ts` — keep them in sync.
 - Match length: a match is a single set — best of 3 games. The first side to
@@ -235,8 +248,8 @@ offers MAX / 120 / 60 / 30.
 ### Quick start
 
 ```bash
-git clone https://github.com/monkzoren/digital-tennis.git
-cd digital-tennis
+git clone https://github.com/monkzoren/digital-football.git
+cd digital-football
 cp .env.example .env
 # edit .env — at minimum set PUBLIC_SPACETIMEDB_URI (see table below)
 docker compose up -d --build
@@ -263,7 +276,7 @@ host at all.
 
 | Variable                 | Default          | What it controls |
 |--------------------------|------------------|------------------|
-| `DATABASE_NAME`          | `digital-tennis` | The SpacetimeDB database (module) name. |
+| `DATABASE_NAME`          | `digital-football` | The SpacetimeDB database (module) name. |
 | `CLIENT_PORT`            | `8080`           | Host port for the web client (irrelevant behind Coolify/Traefik domains). |
 | `SPACETIMEDB_PORT`       | `3000`           | Only used if you uncomment the `spacetimedb` ports in docker-compose.yml for direct access. |
 
@@ -304,7 +317,7 @@ After that, redeploys are stable.
 | Remote players see `WebSocket connection to 'ws://localhost:3000' failed` | A stale `PUBLIC_SPACETIMEDB_URI` was baked into the client build. That variable no longer exists (same-origin is automatic); redeploy from a current build. Any leftover Coolify entry is ignored, and the client also refuses localhost addresses when the page isn't served from localhost. |
 | `403 ... is not authorized to perform action on database ...: update database` | The database was created by an identity this publisher can no longer become — typically a DB created before key persistence + deterministic publisher identity (its owner died with an old server re-key). Publish as the owner if you have its token (`SPACETIME_TOKEN=<owner token>`, printed by `spacetime login show --token` on a host that owns it), or do a one-time reset: delete the `spacetimedb-data` volume and redeploy (`docker compose down -v && docker compose up -d --build`). Current builds never hit this on normal redeploys: the publisher mints its owner identity from the server's persisted signing key. |
 | `401 ... Invalid token: InvalidSignature` when publishing | The publisher presented a token signed by a key the server no longer uses. Current builds recover automatically (the token is re-minted from the server's current key, same identity). If it persists, the `spacetimedb` service is missing the `--jwt-priv-key-path`/`--jwt-pub-key-path` flags in its compose command — update to the current `docker-compose.yml`. |
-| Game says `CONNECTION FAILED` and nginx logs `POST /v1/identity/websocket-token ... 401` | The browser is holding a token from a previous server instance — recreating the SpacetimeDB volume regenerates the signing key and invalidates every issued token. The client now drops a rejected token and reconnects anonymously; on an older build, close the tab or run `sessionStorage.removeItem('dt_token')` in the console. |
+| Game says `CONNECTION FAILED` and nginx logs `POST /v1/identity/websocket-token ... 401` | The browser is holding a token from a previous server instance — recreating the SpacetimeDB volume regenerates the signing key and invalidates every issued token. The client now drops a rejected token and reconnects anonymously; on an older build, close the tab or run `sessionStorage.removeItem('df_token')` in the console. |
 | Players disconnect after ~100s idle behind Cloudflare | Cloudflare's idle WebSocket timeout; the 30 Hz game traffic normally prevents it. |
 
 ### Updating a running server

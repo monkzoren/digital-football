@@ -481,7 +481,7 @@ height ~180px like the updates feed.
    bet column is absent. Winning both crowns shows both banners.
 7. **Lifecycle.** Forfeit during the betting window settles + closes. Last
    competitor leaves → room teardown deletes wallet/bet/book rows (verify
-   via `spacetime logs digital-tennis` — no orphan errors).
+   via `spacetime logs digital-football` — no orphan errors).
 8. **Regression.** Quick match, practice, beer pong, targets: no books, no
    panel, no extra countdown; non-tournament countdown still 3‑2‑1.
 
