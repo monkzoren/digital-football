@@ -1,0 +1,47 @@
+{
+  "name": "digital-tennis-desktop",
+  "productName": "Digital Tennis",
+  "version": "1.0.1",
+  "description": "Desktop client for Digital Tennis — GPU-accelerated regardless of browser settings",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win"
+  },
+  "devDependencies": {
+    "electron": "^37.0.0",
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "com.digitaltennis.desktop",
+    "productName": "DigitalTennis",
+    "files": [
+      "main.js",
+      "release.json"
+    ],
+    "protocols": [
+      {
+        "name": "Digital Tennis",
+        "schemes": [
+          "digitaltennis"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": true,
+      "artifactName": "DigitalTennis-Setup.exe",
+      "runAfterFinish": true
+    },
+    "portable": {
+      "artifactName": "DigitalTennis.exe"
+    }
+  }
+}

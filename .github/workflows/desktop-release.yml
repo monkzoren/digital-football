@@ -1,0 +1,66 @@
+name: Build desktop client
+
+on:
+  push:
+    tags: ['v*']
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing release tag to attach the exes to (optional)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install dependencies
+        working-directory: desktop
+        run: npm ci
+
+      # Stamp the release tag this exe belongs to into the app (release.json
+      # rides inside the package; main.js reports it in the user agent, and
+      # the site flags exes whose tag isn't the latest release's).
+      - name: Stamp release tag
+        working-directory: desktop
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || '' }}
+        run: |
+          node -e "require('fs').writeFileSync('release.json', JSON.stringify({ tag: process.env.RELEASE_TAG || 'dev' }))"
+          node -e "console.log('release.json:', require('fs').readFileSync('release.json', 'utf8'))"
+
+      - name: Build portable exe
+        working-directory: desktop
+        run: npm run dist
+
+      # Always available as a workflow artifact (including manual runs)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DigitalTennis-windows
+          path: |
+            desktop/dist/DigitalTennis-Setup.exe
+            desktop/dist/DigitalTennis.exe
+
+      # Attach the exes to the release: fires for v* tag pushes, any published
+      # release (any tag name), or a manual run given a release_tag.
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
+        with:
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
+          files: |
+            desktop/dist/DigitalTennis-Setup.exe
+            desktop/dist/DigitalTennis.exe
+          generate_release_notes: true

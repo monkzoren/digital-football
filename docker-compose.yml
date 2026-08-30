@@ -1,0 +1,86 @@
+services:
+  # SpacetimeDB standalone server — the entire game backend. Not exposed on
+  # the host: the client's nginx proxies /v1 to it, so everything runs
+  # same-origin through one domain/port. Uncomment ports for direct access.
+  spacetimedb:
+    # Pinned for reproducible deploys. Safe to bump: the JWT signing keys
+    # live in the data volume (see --jwt-*-key-path below), so a new image
+    # no longer re-keys token signing.
+    image: clockworklabs/spacetime:v2.8.3
+    # Run as root: Docker creates the /stdb volume mountpoint owned by root,
+    # and the image's non-root user then cannot write it ("Permission denied
+    # (os error 13) at /stdb/...") — which kills the DB as soon as it needs
+    # to flush state to disk.
+    user: "0:0"
+    # The --jwt-*-key-path flags put the token-signing keys INSIDE the data
+    # volume. Without them the server generates keys in the container
+    # filesystem, so every container recreation (Coolify recreates all
+    # containers on every deploy) re-keys the server: all issued tokens die
+    # with 401 InvalidSignature and the database is orphaned from its owner.
+    # Keys and data share one volume so they can never get out of sync.
+    command:
+      [
+        "start",
+        "--listen-addr", "0.0.0.0:3000",
+        "--data-dir", "/stdb",
+        "--jwt-pub-key-path", "/stdb/keys/id_ecdsa.pub",
+        "--jwt-priv-key-path", "/stdb/keys/id_ecdsa"
+      ]
+    volumes:
+      - spacetimedb-data:/stdb
+    # ports:
+    #   - "${SPACETIMEDB_PORT:-3000}:3000"
+    restart: unless-stopped
+
+  # One-shot job: builds the TypeScript module and publishes it to the server.
+  # Re-run after module changes: docker compose up --build module-publisher
+  module-publisher:
+    build: ./spacetimedb
+    depends_on:
+      - spacetimedb
+    environment:
+      SPACETIMEDB_URL: http://spacetimedb:3000
+      DATABASE_NAME: ${DATABASE_NAME:-digital-tennis}
+      # Optional override: publish as a specific identity (an owner's token).
+      # Normally leave empty — the publisher mints a deterministic owner
+      # token from the server's signing key (see volumes below).
+      SPACETIME_TOKEN: ${SPACETIME_TOKEN:-}
+      # Set to 1 ONLY to deliberately discard all player accounts (XP, MMR,
+      # match history) when a breaking schema change won't publish. Empty is
+      # the safe default: the publisher fails loudly instead.
+      ALLOW_CLEAR: ${ALLOW_CLEAR:-}
+    volumes:
+      # Read-only view of the server's data volume, for /stdb/keys/id_ecdsa:
+      # the publisher signs its own token with the server's key using FIXED
+      # iss/sub claims, so it is the same identity — the database owner — on
+      # every deploy, no matter how often Coolify recreates containers.
+      - spacetimedb-data:/stdb:ro
+      # Fallback identity storage, only used if the server key is missing
+      # (e.g. a server that predates --jwt-*-key-path in its command).
+      - publisher-creds:/root/.config/spacetime
+    restart: "no"
+
+  # Static client + /v1 game-socket proxy, served by nginx. The client always
+  # connects SAME-ORIGIN (nginx proxies /v1 to SpacetimeDB), so there is no
+  # address to configure — it works on any domain, port, or TLS setup.
+  client:
+    build:
+      context: ./client
+      args:
+        VITE_DATABASE_NAME: ${DATABASE_NAME:-digital-tennis}
+        # Firebase web config — public values, baked at build time. Leave
+        # them empty and the client falls back to anonymous SpacetimeDB
+        # identities (progress still works, but only on this browser).
+        VITE_FIREBASE_API_KEY: ${FIREBASE_API_KEY:-}
+        VITE_FIREBASE_AUTH_DOMAIN: ${FIREBASE_AUTH_DOMAIN:-}
+        VITE_FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
+        VITE_FIREBASE_APP_ID: ${FIREBASE_APP_ID:-}
+    depends_on:
+      - spacetimedb
+    ports:
+      - "${CLIENT_PORT:-8080}:80"
+    restart: unless-stopped
+
+volumes:
+  spacetimedb-data:
+  publisher-creds:

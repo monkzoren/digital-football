@@ -1,0 +1,21 @@
+{
+  "name": "digital-tennis-client",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "firebase": "^12.18.0",
+    "spacetimedb": "^2.8.3",
+    "three": "^0.185.1"
+  },
+  "devDependencies": {
+    "@types/three": "^0.185.4",
+    "typescript": "~5.6.2",
+    "vite": "^6.0.0"
+  }
+}

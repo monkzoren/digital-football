@@ -1,0 +1,186 @@
+// Touch controls: a floating 8-way stick on the left, HIT/LOB on the right.
+//
+// The stick is *floating* — it appears wherever the thumb lands inside the
+// left zone rather than at a fixed spot, which is what makes it playable
+// without looking down. Direction is quantised to the same 8 directions the
+// keyboard produces, because the server takes sign(-1/0/1) per axis anyway
+// (see sendDir in main.ts); analog magnitude would be thrown away.
+
+type Handlers = {
+  swing: (kind: number) => void;
+  swingRelease: () => void;
+  chat: () => void;
+};
+
+const $ = (id: string) => document.getElementById(id)!;
+
+let root: HTMLElement;
+let stick: HTMLElement;
+let knob: HTMLElement;
+let home: HTMLElement;
+
+// Live stick state. dir is what the frame loop reads every tick.
+let stickPointer: number | null = null;
+let originX = 0;
+let originY = 0;
+let dir: [number, number] = [0, 0];
+
+// How far the knob travels, as a fraction of the stick's rendered diameter,
+// and how far past centre counts as a direction. The stick is sized in CSS
+// (cqmin, so it scales with the court), hence radius is measured, not fixed.
+const TRAVEL = 0.4;
+const DEADZONE = 0.38; // fraction of the travel radius
+let radius = 46;
+
+/** True once we're confident touch is how this device is being driven.
+ * Strict on purpose: phones/tablets have a coarse primary pointer and no
+ * fine pointer anywhere. A mouse-driven Windows PC often *reports* touch
+ * (phantom digitizers make maxTouchPoints > 0, and a touchscreen makes
+ * pointer:coarse match even with a mouse attached), so any machine with a
+ * fine pointer starts without thumb controls and the first real touch
+ * below turns them on. */
+export let touchAvailable =
+  matchMedia('(pointer: coarse)').matches && !matchMedia('(any-pointer: fine)').matches;
+
+/** Current 8-way direction from the stick, in game space (y up = +1). */
+export function touchDir(): [number, number] {
+  return dir;
+}
+
+let shown = false;
+
+export function setTouchVisible(visible: boolean) {
+  if (!root) return;
+  const show = visible && touchAvailable;
+  if (show === shown) return; // called every frame — don't disturb a held stick
+  shown = show;
+  root.classList.toggle('hidden', !show);
+  document.body.classList.toggle('touch-playing', show);
+  if (!show) releaseStick();
+}
+
+function releaseStick() {
+  stickPointer = null;
+  dir = [0, 0];
+  if (stick) stick.classList.add('hidden');
+  if (home) home.classList.remove('hidden');
+}
+
+function moveKnob(clientX: number, clientY: number) {
+  let dx = clientX - originX;
+  let dy = clientY - originY;
+  const len = Math.hypot(dx, dy);
+  if (len > radius) {
+    dx = (dx / len) * radius;
+    dy = (dy / len) * radius;
+  }
+  knob.style.transform = `translate(${dx}px, ${dy}px)`;
+
+  const t = radius * DEADZONE;
+  // Screen y grows downward; the game's +y is away from the camera.
+  dir = [Math.abs(dx) > t ? Math.sign(dx) : 0, Math.abs(dy) > t ? -Math.sign(dy) : 0];
+}
+
+function initStick() {
+  const zone = $('touch-stick-zone');
+  zone.addEventListener('pointerdown', e => {
+    if (stickPointer !== null) return; // one thumb owns the stick
+    stickPointer = e.pointerId;
+    zone.setPointerCapture(e.pointerId);
+    const rect = root.getBoundingClientRect();
+    stick.classList.remove('hidden'); // measurable only once displayed
+    home.classList.add('hidden');
+    const half = (stick.offsetWidth || 116) / 2;
+    radius = half * 2 * TRAVEL;
+    // Keep the ring inside the court even when the thumb lands on the very
+    // edge — the origin moves with it, so the knob still reads true.
+    const clamp = (v: number, max: number) => Math.min(Math.max(v, half), Math.max(half, max - half));
+    const localX = clamp(e.clientX - rect.left, rect.width);
+    const localY = clamp(e.clientY - rect.top, rect.height);
+    originX = rect.left + localX;
+    originY = rect.top + localY;
+    stick.style.left = `${localX}px`;
+    stick.style.top = `${localY}px`;
+    knob.style.transform = 'translate(0px, 0px)';
+    e.preventDefault();
+  });
+  zone.addEventListener('pointermove', e => {
+    if (e.pointerId !== stickPointer) return;
+    moveKnob(e.clientX, e.clientY);
+    e.preventDefault();
+  });
+  for (const ev of ['pointerup', 'pointercancel'] as const) {
+    zone.addEventListener(ev, e => {
+      if (e.pointerId !== stickPointer) return;
+      releaseStick();
+      e.preventDefault();
+    });
+  }
+}
+
+// Each action button tracks its own pointer id so a second finger on the
+// other button can't cancel the first one's hold — hold length is what the
+// server reads as swing power.
+const releasers: Array<() => void> = [];
+
+function initButton(el: HTMLElement, onDown: () => void, onUp: () => void) {
+  let held: number | null = null;
+  const release = () => {
+    if (held === null) return;
+    held = null;
+    el.classList.remove('pressed');
+    onUp();
+  };
+  releasers.push(release);
+  el.addEventListener('pointerdown', e => {
+    if (held !== null) return;
+    held = e.pointerId;
+    el.setPointerCapture(e.pointerId);
+    el.classList.add('pressed');
+    onDown();
+    e.preventDefault();
+  });
+  for (const ev of ['pointerup', 'pointercancel'] as const) {
+    el.addEventListener(ev, e => {
+      if (e.pointerId !== held) return;
+      release();
+      e.preventDefault();
+    });
+  }
+}
+
+export function initTouch(h: Handlers) {
+  root = $('touch-controls');
+  stick = $('touch-stick');
+  knob = $('touch-knob');
+  home = $('touch-home');
+
+  initStick();
+  initButton($('touch-hit'), () => h.swing(0), h.swingRelease);
+  initButton($('touch-lob'), () => h.swing(1), h.swingRelease);
+  $('touch-chat').addEventListener('click', e => {
+    e.preventDefault();
+    h.chat();
+  });
+
+  // A touch-screen laptop reports a fine primary pointer while being
+  // prodded at, so the first real touch flips the controls on; the frame
+  // loop's setTouchVisible call picks the change up immediately.
+  if (!touchAvailable) {
+    window.addEventListener(
+      'touchstart',
+      () => {
+        touchAvailable = true;
+      },
+      { once: true, passive: true }
+    );
+  }
+
+  // Losing the window mid-swing would otherwise leave the swing held down.
+  // Only buttons actually held report a release, so we never fire a reducer
+  // on a connection with nothing in flight.
+  window.addEventListener('blur', () => {
+    releaseStick();
+    for (const release of releasers) release();
+  });
+}
