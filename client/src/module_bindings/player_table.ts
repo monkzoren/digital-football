@@ -44,4 +44,6 @@ export default __t.row({
   holdTicks: __t.u8().name("hold_ticks"),
   velX: __t.f32().name("vel_x"),
   velY: __t.f32().name("vel_y"),
+  cards: __t.u8(),
+  sentOff: __t.bool().name("sent_off"),
 });

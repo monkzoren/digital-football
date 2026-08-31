@@ -59,6 +59,8 @@ const RK_CORNER = 4; // over the goal line off a defender
 const RK_HALFTIME = 5;
 const RK_OVERTIME = 6;
 const RK_DROP = 7; // neutral drop after a reconnect halt
+const RK_FREEKICK = 8; // foul outside the area
+const RK_PENALTY = 9; // foul by the defending side inside its own area
 
 // ---------------------------------------------------------------------------
 // Movement, dribbling, kicking
@@ -112,6 +114,15 @@ const SLIDE_SPEED = 26; // 7.9 m/s — a lunge, not a teleport
 const SLIDE_REACH = 4.0;
 const SLIDE_COST = 220; // stamina
 const SLIDE_KNOCK = 40; // pace the won ball is knocked ahead with
+// A lunge that reaches a man rather than the ball is a foul. The reach is a
+// touch shorter than SLIDE_REACH so that a tackle which was ALWAYS going to
+// win the ball is not also punished for the follow-through.
+const FOUL_REACH = 3.2;
+// Where a penalty is spotted, measured in from the goal line.
+const PENALTY_SPOT = 12;
+// A caution is shown for a foul on a player who actually had the ball. Two
+// of them is a red, the same as the real thing.
+const CARDS_FOR_RED = 2;
 
 // Characters: per-athlete stats, all multipliers around 1.0. Every edge is
 // paid for elsewhere — the pip totals on the client's select screen all match
@@ -476,6 +487,12 @@ const Player = table(
     // player leans into a run and settles out of it.
     velX: t.f32().default(0),
     velY: t.f32().default(0),
+    // NOTE: appended — DISCIPLINE. cards counts cautions shown; a second one
+    // is a sending-off. A sent-off body is walked to the touchline, skipped by
+    // the AI and the integrator, and can never be bound to a stick again — the
+    // offending side genuinely plays the rest of the match a man down.
+    cards: t.u8().default(0),
+    sentOff: t.bool().default(false),
   }
 );
 
@@ -500,6 +517,12 @@ const Ball = table(
     // player locked out is lastTouchId — whoever struck it is by definition
     // the last to have touched it.
     lockTicks: t.u8().default(0),
+    // NOTE: appended — was the last touch a DELIBERATE KICK (or throw-in) by
+    // an outfielder of lastTouchSide? That is the whole of the back-pass law:
+    // a keeper may not handle a ball a team-mate has deliberately played to
+    // him. A tackle, a deflection, a header or a keeper's own release are all
+    // touches that clear it.
+    fromKick: t.bool().default(false),
   }
 );
 
@@ -876,7 +899,21 @@ function controlledBody(ctx: Ctx, me: PlayerRow): PlayerRow {
     if (b.side === me.side && b.ctrlSeat === me.teamSlot) return b;
   }
   const mine = ctx.db.player.identity.find(me.identity);
-  if (!mine || mine.role !== ROLE_OUTFIELD) return me;
+  // Sent off. My own row is no longer a body on the pitch, so the seat has to
+  // find another one — otherwise the fallback stamps a man who is standing on
+  // the touchline and the stick drives nobody for the rest of the match.
+  if (mine && mine.sentOff) {
+    let alt: PlayerRow | null = null;
+    for (const b of ctx.db.player.byMatch.filter(me.matchId)) {
+      if (b.side !== me.side || b.spectator || b.sentOff) continue;
+      if (b.ctrlSeat !== CTRL_NONE) continue;
+      if (b.role !== ROLE_OUTFIELD) continue;
+      if (!alt || b.teamSlot < alt.teamSlot) alt = b;
+    }
+    if (alt) return ctx.db.player.identity.update({ ...alt, ctrlSeat: me.teamSlot });
+    return mine;
+  }
+  if (!mine || mine.role !== ROLE_OUTFIELD || mine.sentOff) return me;
   return ctx.db.player.identity.update({ ...mine, ctrlSeat: mine.teamSlot });
 }
 
@@ -1156,6 +1193,8 @@ function insertKeeper(ctx: Ctx, lobbyId: bigint, match: MatchRow, side: number) 
     holdTicks: 0,
     velX: 0,
     velY: 0, // spawned with this match, deleted with it
+    cards: 0,
+    sentOff: false,
   };
   if (ctx.db.player.identity.find(identity)) ctx.db.player.identity.update(row);
   else ctx.db.player.insert(row);
@@ -1202,6 +1241,8 @@ function insertFiller(ctx: Ctx, lobbyId: bigint, match: MatchRow, side: number, 
     holdTicks: 0,
     velX: 0,
     velY: 0,
+    cards: 0,
+    sentOff: false,
   };
   if (ctx.db.player.identity.find(identity)) ctx.db.player.identity.update(row);
   else ctx.db.player.insert(row);
@@ -1254,6 +1295,7 @@ function goLive(ctx: Ctx, match: MatchRow) {
   if (!ctx.db.ball.matchId.find(match.id)) {
     ctx.db.ball.insert({
       matchId: match.id,
+      fromKick: false,
       active: false,
       x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0,
       lastTouchSide: 0,
@@ -1614,7 +1656,7 @@ function isRanked(
   // silently freeze MMR. Here isBot means "this row is not a person".
   const humansOn = (side: number) =>
     seats.filter(
-      p => p.side === side && !p.spectator && p.role === ROLE_OUTFIELD && !p.isBot
+      p => p.side === side && !p.spectator && !p.sentOff && p.role === ROLE_OUTFIELD && !p.isBot
     ).length;
   const seatsPerSide = lobbyTeamSize(lobby);
   return humansOn(0) === seatsPerSide && humansOn(1) === seatsPerSide;
@@ -1628,7 +1670,7 @@ function sideMmr(
   // Humans only: a filler bot holds no account row, so counting one would
   // pull a strong side's average back toward MMR_START. (isBot = not a person.)
   const rows = seats.filter(
-    p => p.side === side && !p.spectator && p.role === ROLE_OUTFIELD && !p.isBot
+    p => p.side === side && !p.spectator && !p.sentOff && p.role === ROLE_OUTFIELD && !p.isBot
   );
   if (rows.length === 0) return MMR_START;
   let total = 0;
@@ -2119,7 +2161,7 @@ function restartTaker(ctx: Ctx, match: MatchRow): PlayerRow | null {
     p =>
       p.side === match.restartSide &&
       p.role === ROLE_OUTFIELD &&
-      !p.spectator &&
+      !p.spectator && !p.sentOff &&
       p.slideTicks === 0
   );
   if (mine.length === 0) return null;
@@ -2134,6 +2176,73 @@ function restartTaker(ctx: Ctx, match: MatchRow): PlayerRow | null {
     Math.hypot(b.x - match.restartX, b.y - match.restartY)
       ? a
       : b
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Discipline. A slide that reaches the man instead of the ball is a foul, and
+// a foul has consequences: the other side gets the ball back where it
+// happened, the referee shows a card if the victim actually had possession,
+// and a second card is a sending-off that the offending side plays out a man
+// down. Inside the offender's own area it is a penalty.
+// ---------------------------------------------------------------------------
+function awardFoul(
+  ctx: Ctx,
+  match: MatchRow,
+  ball: BallRow,
+  offender: PlayerRow,
+  victim: PlayerRow,
+  hadBall: boolean
+): void {
+  const defSign = sideSign(offender.side); // the offender's OWN goal line
+  const inOffendersBox =
+    Math.abs(victim.x) < BOX_HALF_W &&
+    Math.abs(victim.y - defSign * PITCH_HALF_LEN) < BOX_DEPTH &&
+    victim.y * defSign > 0;
+  const penalty = inOffendersBox;
+
+  // A caution is for a foul on a player who actually had the ball — a
+  // deliberate stopping of an attack. A clumsy lunge at a loose ball is a
+  // free kick and nothing more.
+  let cards = offender.cards;
+  let sentOff = offender.sentOff;
+  let cardMsg = '';
+  if (hadBall) {
+    cards = Math.min(255, cards + 1);
+    if (cards >= CARDS_FOR_RED) {
+      sentOff = true;
+      cardMsg = ' — RED CARD';
+    } else {
+      cardMsg = ' — YELLOW CARD';
+    }
+  }
+  if (cards !== offender.cards || sentOff !== offender.sentOff) {
+    ctx.db.player.identity.update({
+      ...offender,
+      cards,
+      sentOff,
+      // a sent-off man walks: no stick, no lunge, no ball
+      ctrlSeat: sentOff ? CTRL_NONE : offender.ctrlSeat,
+      slideTicks: 0,
+      mvX: 0, mvY: 0, velX: 0, velY: 0,
+      kickHeld: false, kickTicks: 0,
+      holdTicks: 0,
+    });
+  }
+
+  const spotX = penalty ? 0 : clamp(victim.x, -PITCH_HALF_WID + 2, PITCH_HALF_WID - 2);
+  const spotY = penalty
+    ? defSign * (PITCH_HALF_LEN - PENALTY_SPOT)
+    : clamp(victim.y, -PITCH_HALF_LEN + 2, PITCH_HALF_LEN - 2);
+  awardRestart(
+    ctx,
+    match,
+    ball,
+    penalty ? RK_PENALTY : RK_FREEKICK,
+    victim.side,
+    spotX,
+    spotY,
+    (penalty ? 'PENALTY' : 'FREE KICK') + cardMsg
   );
 }
 
@@ -2256,6 +2365,10 @@ function executeKick(
     hasOwner: false,
     ownerId: ZERO_ID,
     lockTicks: KICK_LOCK,
+    // The back-pass law hangs off this flag: a DELIBERATE kick by an
+    // outfielder is the thing the keeper may not then pick up. A throw-in is
+    // executed through here too, which is right — the law covers that as well.
+    fromKick: kicker.role !== ROLE_KEEPER,
   });
 }
 
@@ -2374,6 +2487,8 @@ function insertBot(ctx: Ctx, lobbyId: bigint, index: number, side: number): Iden
     holdTicks: 0,
     velX: 0,
     velY: 0,
+    cards: 0,
+    sentOff: false,
   };
   if (ctx.db.player.identity.find(identity)) ctx.db.player.identity.update(row);
   else ctx.db.player.insert(row);
@@ -2505,6 +2620,8 @@ export const onConnect = spacetimedb.clientConnected(ctx => {
       holdTicks: 0,
       velX: 0,
       velY: 0,
+      cards: 0,
+      sentOff: false,
     });
     return;
   }
@@ -3127,7 +3244,7 @@ function switchCandidates(ctx: Ctx, me: PlayerRow, cur: PlayerRow): PlayerRow[] 
   return matchPlayers(ctx, me.matchId).filter(
     b =>
       b.side === me.side &&
-      !b.spectator &&
+      !b.spectator && !b.sentOff &&
       b.slideTicks === 0 &&
       b.ctrlSeat === CTRL_NONE &&
       !sameId(b.identity, cur.identity)
@@ -3278,9 +3395,13 @@ function sidesOf(ctx: Ctx, me: PlayerRow, body: PlayerRow) {
   const all = matchPlayers(ctx, me.matchId);
   return {
     mates: all.filter(
-      p => p.side === body.side && !p.spectator && !sameId(p.identity, body.identity)
+      p =>
+        p.side === body.side && !p.spectator && !p.sentOff &&
+        !sameId(p.identity, body.identity)
     ),
-    foes: all.filter(p => p.side !== body.side && p.role === ROLE_OUTFIELD && !p.spectator),
+    foes: all.filter(
+      p => p.side !== body.side && p.role === ROLE_OUTFIELD && !p.spectator && !p.sentOff
+    ),
   };
 }
 
@@ -3315,6 +3436,7 @@ export const action = spacetimedb.reducer({ button: t.u8() }, (ctx, { button }) 
         lastTouchSide: body.side,
         lastTouchId: body.identity,
         lockTicks: 0,
+        fromKick: false, // putting it down is not a pass back to yourself
       });
       return;
     }
@@ -3343,6 +3465,20 @@ export const action = spacetimedb.reducer({ button: t.u8() }, (ctx, { button }) 
   // ---- SET PIECES ----
   if (takingRestart || (match.phase === PHASE_KICKOFF && body.side === match.kickoffSide)) {
     const kind = match.phase === PHASE_KICKOFF ? RK_KICKOFF : match.restartKind;
+    // A PENALTY is a shot, not a pass. Routing it through the pass finder
+    // would have the taker roll it to the nearest team-mate from twelve
+    // yards, which is not a penalty by any reading.
+    if (kind === RK_PENALTY) {
+      const goalY = atk * PITCH_HALF_LEN;
+      const aimX = clamp(stickX * (GOAL_HALF_W - 1.2), -(GOAL_HALF_W - 1.2), GOAL_HALF_W - 1.2);
+      executeKick(
+        ctx, match, ball, body, button === ACT_SECOND ? KICK_CHIP : KICK_NORMAL,
+        button === ACT_THIRD ? PASS_POWER : SHOT_POWER,
+        aimX - ball.x, goalY - ball.y, 0, true
+      );
+      clearGraceOnTouch(ctx, match, body.side);
+      return;
+    }
     const short = button === ACT_THIRD;
     const high = button === ACT_SECOND;
     const range = short ? 26 : kind === RK_CORNER ? PITCH_HALF_LEN : PITCH_HALF_LEN * 0.8;
@@ -3415,6 +3551,7 @@ export const action = spacetimedb.reducer({ button: t.u8() }, (ctx, { button }) 
       lastTouchSide: body.side,
       lastTouchId: body.identity,
       lockTicks: KICK_LOCK,
+      fromKick: false, // a poke at the ball is a challenge, not a pass
     });
     clearGraceOnTouch(ctx, match, body.side);
   }
@@ -3706,6 +3843,7 @@ function keeperPlay(
         ownerId: keeper.identity,
         lastTouchSide: keeper.side,
         lastTouchId: keeper.identity,
+        fromKick: false,
       });
       return;
     }
@@ -3713,10 +3851,10 @@ function keeperPlay(
     // hoof toward whichever flank the ball happened to be on is a free
     // turnover on every goal kick, and a 3-minute half has a lot of those.
     const mates = matchPlayers(ctx, match.id).filter(
-      p => p.side === keeper.side && p.role === ROLE_OUTFIELD && !p.spectator
+      p => p.side === keeper.side && p.role === ROLE_OUTFIELD && !p.spectator && !p.sentOff
     );
     const foes = matchPlayers(ctx, match.id).filter(
-      p => p.side !== keeper.side && p.role === ROLE_OUTFIELD && !p.spectator
+      p => p.side !== keeper.side && p.role === ROLE_OUTFIELD && !p.spectator && !p.sentOff
     );
     let best: PlayerRow | null = null;
     let bestScore = -Infinity;
@@ -3766,6 +3904,7 @@ function keeperPlay(
         vz: 26,
         lastTouchSide: keeper.side,
         lastTouchId: keeper.identity,
+        fromKick: false,
         hasOwner: false,
         ownerId: ZERO_ID,
         lockTicks: KICK_LOCK,
@@ -3791,8 +3930,16 @@ function keeperPlay(
   // this the keeper scoops up the restart the player was handed and the goal
   // kick is never theirs to take.
   const ourRestart = match.graceTicks > 0 && match.restartSide === keeper.side;
+  // THE BACK-PASS LAW. A keeper may not handle a ball a team-mate has
+  // deliberately kicked (or thrown in) to him. He can still play it with his
+  // feet like anyone else — which is the whole point of the law, and what
+  // makes a hurried pass back a decision rather than a free reset.
+  const backPass =
+    ball.fromKick &&
+    ball.lastTouchSide === keeper.side &&
+    !sameId(ball.lastTouchId, keeper.identity);
   if (
-    ball.active && !justReleased && !ourRestart &&
+    ball.active && !justReleased && !ourRestart && !backPass &&
     dist < KEEPER_CLEAR_RADIUS * lvl.reach && ball.z < 7 &&
     mayTouch(match, keeper.side)
   ) {
@@ -3807,6 +3954,7 @@ function keeperPlay(
         ownerId: keeper.identity,
         lastTouchSide: keeper.side,
         lastTouchId: keeper.identity,
+        fromKick: false,
         lockTicks: 0,
       });
       clearGraceOnTouch(ctx, match, keeper.side);
@@ -4103,6 +4251,8 @@ export const game_tick = spacetimedb.reducer(
         case RK_THROWIN:
         case RK_GOALKICK:
         case RK_CORNER:
+        case RK_FREEKICK:
+        case RK_PENALTY:
         case RK_DROP: {
           const ball = ctx.db.ball.matchId.find(match.id);
           if (ball) {
@@ -4118,7 +4268,45 @@ export const game_tick = spacetimedb.reducer(
               ownerId: ZERO_ID,
               lastTouchSide: match.restartSide,
               lockTicks: 0,
+              // a stoppage clears the back-pass state: whatever the keeper
+              // could not pick up before the whistle, he can after it
+              fromKick: false,
             });
+          }
+          // A PENALTY is taken with the area cleared: everyone but the taker
+          // and the defending keeper is pushed to the edge of the box, and the
+          // keeper is put on his line. Without this the ten bodies standing
+          // where the whistle caught them make the spot kick meaningless.
+          if (match.restartKind === RK_PENALTY) {
+            const defSign = -sideSign(match.restartSide); // the goal being shot at
+            const taker = restartTaker(ctx, match);
+            for (const p of matchPlayers(ctx, match.id)) {
+              if (p.spectator || p.sentOff) continue;
+              if (p.role === ROLE_KEEPER && p.side !== match.restartSide) {
+                ctx.db.player.identity.update({
+                  ...p,
+                  x: 0, y: defSign * (PITCH_HALF_LEN - 1),
+                  mvX: 0, mvY: 0, velX: 0, velY: 0, holdTicks: 0,
+                });
+                continue;
+              }
+              if (taker && sameId(p.identity, taker.identity)) {
+                ctx.db.player.identity.update({
+                  ...p,
+                  x: 0, y: match.restartY + sideSign(match.restartSide) * 3,
+                  mvX: 0, mvY: 0, velX: 0, velY: 0,
+                });
+                continue;
+              }
+              // everyone else: back to the edge of the area, fanned out
+              const lane = (p.teamSlot % 4) - 1.5;
+              ctx.db.player.identity.update({
+                ...p,
+                x: clamp(lane * 7 + (p.side === match.restartSide ? 2 : -2), -BOX_HALF_W, BOX_HALF_W),
+                y: defSign * (PITCH_HALF_LEN - BOX_DEPTH - 4),
+                mvX: 0, mvY: 0, velX: 0, velY: 0,
+              });
+            }
           }
           // HAND THE RESTART TO THE PLAYER. A restart the human watches a bot
           // take is a restart they did not get to play — most of all a goal
@@ -4173,7 +4361,7 @@ export const game_tick = spacetimedb.reducer(
     // no table reads and no per-bot filtering inside the 30 Hz loop.
     const outBySide: PlayerRow[][] = [[], []];
     for (const p of players) {
-      if (p.role === ROLE_OUTFIELD && !p.spectator) outBySide[p.side].push(p);
+      if (p.role === ROLE_OUTFIELD && !p.spectator && !p.sentOff) outBySide[p.side].push(p);
     }
     for (const side of [0, 1]) outBySide[side].sort((a, b) => a.teamSlot - b.teamSlot);
     const carrier =
@@ -4190,6 +4378,19 @@ export const game_tick = spacetimedb.reducer(
     // ---- Movement (humans by stick, outfield bots by brain, keepers) ----
     for (const p of players) {
       if (p.spectator) continue;
+      // A sent-off player is off the pitch and stays off it: walked to the
+      // touchline once and then skipped entirely, so the side really does
+      // play out the rest of the match a man down.
+      if (p.sentOff) {
+        const off = sideSign(p.side) * (PITCH_HALF_WID + 6);
+        if (Math.abs(p.x - off) > 0.5 || Math.abs(p.y) > 0.5) {
+          ctx.db.player.identity.update({
+            ...p, x: off, y: 0, mvX: 0, mvY: 0, velX: 0, velY: 0,
+            kickHeld: false, kickTicks: 0, slideTicks: 0, ctrlSeat: CTRL_NONE,
+          });
+        }
+        continue;
+      }
       // AI keepers are moved by keeperPlay; a human-driven one walks like
       // anyone else, or taking the gloves would leave you rooted to the spot.
       if (p.role === ROLE_KEEPER && p.ctrlSeat === CTRL_NONE) continue;
@@ -4203,6 +4404,7 @@ export const game_tick = spacetimedb.reducer(
           const nx = clamp(cur.x + cur.slideDirX * SLIDE_SPEED * DT, -P_BOUNDS_X, P_BOUNDS_X);
           const ny = clamp(cur.y + cur.slideDirY * SLIDE_SPEED * DT, -P_BOUNDS_Y, P_BOUNDS_Y);
           ctx.db.player.identity.update({ ...cur, x: nx, y: ny, slideTicks: t2 });
+          let wonBall = false;
           // ball win: knock it ahead along the slide
           if (
             ball && ball.active && match.phase === PHASE_LIVE &&
@@ -4221,9 +4423,31 @@ export const game_tick = spacetimedb.reducer(
                 hasOwner: false,
                 ownerId: ZERO_ID,
                 lockTicks: KICK_LOCK,
+                fromKick: false, // a tackle is not a deliberate pass
               });
               match = clearGraceOnTouch(ctx, match, cur.side);
               ball = ctx.db.ball.matchId.find(match.id);
+              wonBall = true;
+            }
+          }
+          // FOUL. A lunge that got nowhere near the ball but did reach an
+          // opponent is a foul, and it is what makes the slide a decision
+          // rather than a free action — before this the tackle could only
+          // ever win the ball or whiff, which is why the game had no rules
+          // worth the name. Ball first: a tackle that took the ball is a
+          // fair tackle no matter who it also caught.
+          const slider = cur;
+          if (!wonBall && ball && match.phase === PHASE_LIVE) {
+            const victim = players.find(
+              q =>
+                q.side !== slider.side && !q.spectator && !q.sentOff &&
+                q.slideTicks === 0 &&
+                Math.hypot(q.x - nx, q.y - ny) < FOUL_REACH
+            );
+            if (victim) {
+              const hadBall = !!ball.hasOwner && sameId(ball.ownerId, victim.identity);
+              awardFoul(ctx, match, ball, slider, victim, hadBall);
+              return; // the whistle has gone; the rest of the tick is moot
             }
           }
         } else {
@@ -4493,7 +4717,7 @@ export const game_tick = spacetimedb.reducer(
     // (after PUT BALL DOWN): an AI keeper uses its hands and its own code,
     // and letting it dribble would send it up the pitch.
     const eligible = (p: PlayerRow) =>
-      !p.spectator &&
+      !p.spectator && !p.sentOff &&
       (p.role === ROLE_OUTFIELD || p.ctrlSeat !== CTRL_NONE) &&
       p.slideTicks === 0 &&
       (protectedSide < 0 || p.side === protectedSide) &&
@@ -4530,6 +4754,7 @@ export const game_tick = spacetimedb.reducer(
           lastTouchSide: owner.side,
           lastTouchId: owner.identity,
           lockTicks: 0, // a new touch ends the striker's lock
+          fromKick: false, // trapped off a body, not played
         };
         owner = null;
       }
@@ -4563,6 +4788,7 @@ export const game_tick = spacetimedb.reducer(
           lastTouchSide: contester.side,
           lastTouchId: contester.identity,
           lockTicks: 0,
+          fromKick: false,
         };
         match = clearGraceOnTouch(ctx, match, contester.side);
       } else {
@@ -4593,6 +4819,7 @@ export const game_tick = spacetimedb.reducer(
           ownerId: owner.identity,
           lastTouchSide: owner.side,
           lastTouchId: owner.identity,
+          fromKick: false, // taking it under control clears the back-pass
         };
         match = clearGraceOnTouch(ctx, match, owner.side);
       }

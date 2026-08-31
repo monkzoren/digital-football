@@ -79,6 +79,8 @@ export const RK_CORNER = 4;
 export const RK_HALFTIME = 5;
 export const RK_OVERTIME = 6;
 export const RK_DROP = 7;
+export const RK_FREEKICK = 8;
+export const RK_PENALTY = 9;
 
 // Kick kinds — mirrors KICK_*.
 export const KICK_NORMAL = 0;

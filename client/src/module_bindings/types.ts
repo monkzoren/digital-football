@@ -46,6 +46,7 @@ export const Ball = __t.object("Ball", {
   ownerId: __t.identity(),
   hasOwner: __t.bool(),
   lockTicks: __t.u8(),
+  fromKick: __t.bool(),
 });
 export type Ball = __Infer<typeof Ball>;
 
@@ -233,6 +234,8 @@ export const Player = __t.object("Player", {
   holdTicks: __t.u8(),
   velX: __t.f32(),
   velY: __t.f32(),
+  cards: __t.u8(),
+  sentOff: __t.bool(),
 });
 export type Player = __Infer<typeof Player>;
 

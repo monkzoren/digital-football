@@ -5,7 +5,7 @@ import {
   SPACETIMEDB_URI, DATABASE_NAME, GRAVITY, PLAYER_SPEED, SPRINT_MUL, CHAR_SPEED, TICK_HZ,
   PHASE_KICKOFF, PHASE_LIVE, PHASE_PAUSE, PHASE_OVER,
   STAMINA_MAX,
-  RK_NONE, RK_KICKOFF, RK_THROWIN, RK_GOALKICK, RK_CORNER, RK_HALFTIME, RK_OVERTIME, RK_DROP,
+  RK_NONE, RK_KICKOFF, RK_THROWIN, RK_GOALKICK, RK_CORNER, RK_HALFTIME, RK_OVERTIME, RK_DROP, RK_FREEKICK, RK_PENALTY,
   HALF_SECONDS, OT_SECONDS, ROLE_KEEPER, SQUAD_SIZE, KEEPER_RIG_SEAT, KICK_RANGE,
   totalXpFor, levelFor, LEVEL_MAX, CLAIM_UNLOCK_SECS,
 } from './config';
@@ -78,6 +78,8 @@ const RESTART_NAMES: Record<number, string> = {
   [RK_HALFTIME]: 'HALF-TIME',
   [RK_OVERTIME]: 'GOLDEN GOAL',
   [RK_DROP]: 'DROP BALL',
+  [RK_FREEKICK]: 'FREE KICK',
+  [RK_PENALTY]: 'PENALTY',
 };
 
 // Match lifecycle
@@ -1577,6 +1579,9 @@ function actionLabels(match: any, ball: any, body: any): ActionLabels {
       case RK_THROWIN: return ['THROW IN', 'LONG THROW', 'SHORT THROW'];
       case RK_CORNER: return ['CORNER', 'HIGH CORNER', 'SHORT CORNER'];
       case RK_GOALKICK: return ['GOAL KICK', 'LONG BALL', 'SHORT'];
+      case RK_FREEKICK: return ['FREE KICK', 'CHIP IT', 'SHORT'];
+      // a penalty is a shot, and the only one of these where button 1 is it
+      case RK_PENALTY: return ['SHOOT', 'CHIP IT', 'PLACE IT'];
       default: return ['PASS', 'LOB', 'SHORT'];
     }
   }

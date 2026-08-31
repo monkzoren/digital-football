@@ -24,4 +24,5 @@ export default __t.row({
   ownerId: __t.identity().name("owner_id"),
   hasOwner: __t.bool().name("has_owner"),
   lockTicks: __t.u8().name("lock_ticks"),
+  fromKick: __t.bool().name("from_kick"),
 });
