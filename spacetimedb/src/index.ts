@@ -197,7 +197,13 @@ const KEEPER_RANGE_Y = BOX_DEPTH; // never strays past the box
 // it covers two thirds of the mouth and can never be wrong-footed — an
 // unbeatable wall. Until it dives properly, its reach is what has to give.
 const KEEPER_CLEAR_RADIUS = 3.4;
-const KEEPER_CLEAR_SPEED = 62; // anything less is a back-pass to the striker
+const KEEPER_CLEAR_SPEED = 62;
+// A keeper CATCHES rather than volleying everything back: it holds the ball
+// for a beat and then picks a pass. Real football, and it also gives the
+// defending side a moment to breathe after a save.
+const KEEPER_HOLD = ticks(1.3);
+// A throw finds a team-mate; anything longer gets hit.
+const KEEPER_THROW_RANGE = 46; // anything less is a back-pass to the striker
 
 // Outfield bot difficulty (0 easy · 1 normal · 2 hard):
 //   speed        movement multiplier
@@ -449,6 +455,10 @@ const Player = table(
     // Movement integrates these instead; humans just copy their stick in.
     mvX: t.f32().default(0),
     mvY: t.f32().default(0),
+    // NOTE: appended — ticks a keeper still has the ball IN ITS HANDS. While
+    // this is non-zero the ball is pinned to the gloves and nobody can play
+    // it; when it runs out the keeper distributes.
+    holdTicks: t.u8().default(0),
   }
 );
 
@@ -1015,7 +1025,7 @@ function setupKickoff(ctx: Ctx, match: MatchRow, msg: string): MatchRow {
     }
     ctx.db.player.identity.update({
       ...p, x, y, dirX: 0, dirY: 0, mvX: 0, mvY: 0,
-      kickTicks: 0, kickHeld: false, slideTicks: 0,
+      kickTicks: 0, kickHeld: false, slideTicks: 0, holdTicks: 0,
       // Every kickoff hands each human back their own footballer. Reconnect
       // resumes through here, so a returning player needs no special case.
       ctrlSeat: !p.isBot && p.role === ROLE_OUTFIELD ? p.teamSlot : CTRL_NONE,
@@ -1124,7 +1134,8 @@ function insertKeeper(ctx: Ctx, lobbyId: bigint, match: MatchRow, side: number) 
     switchIdx: 0,
     matchBot: true,
     mvX: 0,
-    mvY: 0, // spawned with this match, deleted with it
+    mvY: 0,
+    holdTicks: 0, // spawned with this match, deleted with it
   };
   if (ctx.db.player.identity.find(identity)) ctx.db.player.identity.update(row);
   else ctx.db.player.insert(row);
@@ -1168,6 +1179,7 @@ function insertFiller(ctx: Ctx, lobbyId: bigint, match: MatchRow, side: number, 
     matchBot: true,
     mvX: 0,
     mvY: 0,
+    holdTicks: 0,
   };
   if (ctx.db.player.identity.find(identity)) ctx.db.player.identity.update(row);
   else ctx.db.player.insert(row);
@@ -2304,6 +2316,7 @@ function insertBot(ctx: Ctx, lobbyId: bigint, index: number, side: number): Iden
     matchBot: false,
     mvX: 0,
     mvY: 0,
+    holdTicks: 0,
   };
   if (ctx.db.player.identity.find(identity)) ctx.db.player.identity.update(row);
   else ctx.db.player.insert(row);
@@ -2432,6 +2445,7 @@ export const onConnect = spacetimedb.clientConnected(ctx => {
       matchBot: false,
       mvX: 0,
       mvY: 0,
+      holdTicks: 0,
     });
     return;
   }
@@ -3049,10 +3063,36 @@ export const kick_release = spacetimedb.reducer(ctx => {
       ctx.db.player.identity.update(released);
       return;
     }
-    const power01 = clamp(player.kickTicks / KICK_CHARGE_TICKS, 0.15, 1);
+    // A kickoff is a PASS, not a shot. One press rolls it to the nearest
+    // team-mate — no charging, no aiming — which is what actually happens at
+    // a kickoff and means the restart never asks the player to fight a power
+    // meter before the game has started.
+    const mates = matchPlayers(ctx, match.id).filter(
+      p =>
+        p.side === player.side &&
+        p.role === ROLE_OUTFIELD &&
+        !p.spectator &&
+        !sameId(p.identity, player.identity)
+    );
+    let target: PlayerRow | null = null;
+    let bestD = Infinity;
+    for (const m of mates) {
+      // pick a team-mate who is level or behind: a kickoff goes sideways or
+      // back, never hoofed forward into the opposition half
+      const back = (m.y - player.y) * sideSign(player.side);
+      const d = Math.hypot(m.x - player.x, m.y - player.y);
+      if (back < -2) continue;
+      if (d < bestD) {
+        bestD = d;
+        target = m;
+      }
+    }
+    const aimX = target ? target.x - ball.x : (player.dirX || 1);
+    const aimY = target ? target.y - ball.y : sideSign(player.side) * 0.6;
     executeKick(
-      ctx, match, ball, player, player.kickKind, power01,
-      player.dirX, player.dirY
+      ctx, match, ball, player, KICK_NORMAL,
+      clamp(bestD / AI_PASS_MAX, 0.22, 0.55), // firm enough to arrive, never a shot
+      aimX, aimY
     );
     ctx.db.match.id.update({
       ...match,
@@ -3471,12 +3511,126 @@ function keeperPlay(
   const gs = sideSign(keeper.side); // sign of my goal line
   const lineY = gs * (PITCH_HALF_LEN - KEEPER_LINE);
 
-  // Clear anything playable in reach — one-touch, upfield, toward a flank.
+  // ---- HANDS ----
+  // Already holding it: keep it in the gloves, then throw or kick it out.
+  if (keeper.holdTicks > 0) {
+    const left = keeper.holdTicks - 1;
+    ctx.db.player.identity.update({ ...keeper, holdTicks: left, mvX: 0, mvY: 0 });
+    if (left > 0) {
+      // pinned to the gloves, at chest height, untouchable by anyone
+      ctx.db.ball.matchId.update({
+        ...ball,
+        active: true,
+        x: keeper.x + (ball.x > keeper.x ? 0.6 : -0.6),
+        y: keeper.y - gs * 1.2,
+        z: 2.6,
+        vx: 0, vy: 0, vz: 0,
+        hasOwner: true,
+        ownerId: keeper.identity,
+        lastTouchSide: keeper.side,
+        lastTouchId: keeper.identity,
+      });
+      return;
+    }
+    // DISTRIBUTE: find the best team-mate upfield and pick them out. A fixed
+    // hoof toward whichever flank the ball happened to be on is a free
+    // turnover on every goal kick, and a 3-minute half has a lot of those.
+    const mates = matchPlayers(ctx, match.id).filter(
+      p => p.side === keeper.side && p.role === ROLE_OUTFIELD && !p.spectator
+    );
+    const foes = matchPlayers(ctx, match.id).filter(
+      p => p.side !== keeper.side && p.role === ROLE_OUTFIELD && !p.spectator
+    );
+    let best: PlayerRow | null = null;
+    let bestScore = -Infinity;
+    for (const m of mates) {
+      const d = Math.hypot(m.x - keeper.x, m.y - keeper.y);
+      if (d < 6) continue; // too close to be worth a throw
+      const open = foes.reduce(
+        (acc, o) => Math.min(acc, Math.hypot(o.x - m.x, o.y - m.y)),
+        99
+      );
+      // upfield and unmarked, and don't hand it to someone in our own six-yard box
+      const upfield = (m.y - keeper.y) * -gs;
+      const score = upfield * 0.5 + open * 1.4 - (d > KEEPER_THROW_RANGE ? 25 : 0);
+      if (score > bestScore) {
+        bestScore = score;
+        best = m;
+      }
+    }
+    const st = charStat(keeper.characterId);
+    if (best && bestScore > 0) {
+      const d = Math.hypot(best.x - keeper.x, best.y - keeper.y);
+      const lofted = d > KEEPER_THROW_RANGE * 0.6;
+      // aim at the accurate keeper's man; a poor one sprays it
+      const err = (ctx.random() - 0.5) * 2 * (lvl.err * 1.5);
+      // executeKick stamps lockTicks + lastTouchId, which is what stops the
+      // keeper re-gathering its own distribution on the next tick.
+      executeKick(
+        ctx, match,
+        { ...ball, x: keeper.x, y: keeper.y, z: 1.2, hasOwner: false, ownerId: ZERO_ID },
+        keeper,
+        lofted ? KICK_CHIP : KICK_NORMAL,
+        // never a dink: a weak distribution just drops the ball back into the
+        // six-yard box for the striker who was already standing there
+        clamp(d / KEEPER_THROW_RANGE, 0.5, 0.95),
+        best.x + err - keeper.x,
+        best.y - keeper.y
+      );
+    } else {
+      // nobody on: put it long down a flank
+      const flank = ball.x >= 0 ? 1 : -1;
+      ctx.db.ball.matchId.update({
+        ...ball,
+        active: true,
+        x: keeper.x, y: keeper.y, z: 1.2,
+        vx: flank * 22 + (ctx.random() - 0.5) * 6,
+        vy: -gs * KEEPER_CLEAR_SPEED * st.power,
+        vz: 26,
+        lastTouchSide: keeper.side,
+        lastTouchId: keeper.identity,
+        hasOwner: false,
+        ownerId: ZERO_ID,
+        lockTicks: KICK_LOCK,
+      });
+    }
+    clearGraceOnTouch(ctx, match, keeper.side);
+    return;
+  }
+
+  // CATCH IT. A keeper may only handle the ball inside its own penalty area —
+  // outside it, it is just another player and can only kick.
   const dist = Math.hypot(ball.x - keeper.x, ball.y - keeper.y);
+  const inOwnBox =
+    Math.abs(ball.x) < BOX_HALF_W && Math.abs(ball.y - gs * PITCH_HALF_LEN) < BOX_DEPTH;
+  // A keeper may not handle the ball it just released until somebody else
+  // plays it — the actual law, and the only version that terminates. Keying
+  // this on the brief KICK_LOCK instead let the keeper re-gather the moment
+  // the lock expired: holds came out at 3-5s instead of one, and the ball
+  // spent 89% of the match in a pair of gloves.
+  const justReleased = sameId(ball.lastTouchId, keeper.identity);
   if (
-    ball.active && dist < KEEPER_CLEAR_RADIUS * lvl.reach && ball.z < 7 &&
+    ball.active && !justReleased &&
+    dist < KEEPER_CLEAR_RADIUS * lvl.reach && ball.z < 7 &&
     mayTouch(match, keeper.side)
   ) {
+    if (inOwnBox) {
+      ctx.db.player.identity.update({ ...keeper, holdTicks: KEEPER_HOLD, mvX: 0, mvY: 0 });
+      ctx.db.ball.matchId.update({
+        ...ball,
+        active: true,
+        x: keeper.x, y: keeper.y - gs * 1.2, z: 2.6,
+        vx: 0, vy: 0, vz: 0,
+        hasOwner: true,
+        ownerId: keeper.identity,
+        lastTouchSide: keeper.side,
+        lastTouchId: keeper.identity,
+        lockTicks: 0,
+      });
+      clearGraceOnTouch(ctx, match, keeper.side);
+      return;
+    }
+    // outside the area: no hands, just boot it clear
     const flank = ball.x >= 0 ? 1 : -1;
     const st = charStat(keeper.characterId);
     ctx.db.ball.matchId.update({
@@ -3484,7 +3638,7 @@ function keeperPlay(
       active: true,
       vx: flank * 22 + (ctx.random() - 0.5) * 6,
       vy: -gs * KEEPER_CLEAR_SPEED * st.power,
-      vz: 26, // it should clear somebody's head
+      vz: 26,
       z: Math.max(ball.z, 0.5),
       lastTouchSide: keeper.side,
       lastTouchId: keeper.identity,
@@ -4087,6 +4241,17 @@ export const game_tick = spacetimedb.reducer(
     };
 
     // ---- Possession / dribbling ----
+    // A ball in a keeper's hands is out of play for everyone: no outfielder
+    // may take it, it cannot roll out, and the keeper's own code owns its
+    // position until it is released.
+    // Read FRESH: `players` was snapshotted before the keeper loop ran, so on
+    // the very tick of a catch the stale copy still says holdTicks = 0 and
+    // possession would strip the ball straight out of the gloves.
+    const keeperHolding = matchPlayers(ctx, match.id).some(
+      p => p.role === ROLE_KEEPER && p.holdTicks > 0
+    );
+    if (keeperHolding) return;
+
     const speedNow = Math.hypot(ball.vx, ball.vy);
     const fresh = matchPlayers(ctx, match.id); // positions moved this tick
     // Snapshot the restart protection as a plain number: the closures below

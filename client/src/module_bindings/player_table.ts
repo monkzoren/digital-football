@@ -41,4 +41,5 @@ export default __t.row({
   switchIdx: __t.u8().name("switch_idx"),
   mvX: __t.f32().name("mv_x"),
   mvY: __t.f32().name("mv_y"),
+  holdTicks: __t.u8().name("hold_ticks"),
 });

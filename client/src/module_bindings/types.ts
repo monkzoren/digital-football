@@ -230,6 +230,7 @@ export const Player = __t.object("Player", {
   switchIdx: __t.u8(),
   mvX: __t.f32(),
   mvY: __t.f32(),
+  holdTicks: __t.u8(),
 });
 export type Player = __Infer<typeof Player>;
 

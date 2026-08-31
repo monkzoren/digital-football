@@ -2126,12 +2126,6 @@ function updatePlates(match: any, players: any[], mySide: number) {
     const stamina = mine ? (player?.stamina ?? STAMINA_MAX) / STAMINA_MAX : 0;
     fill.style.width = `${Math.max(0, Math.min(1, stamina)) * 100}%`;
     fill.classList.toggle('low', mine && stamina < 0.3);
-    const charge = plate.querySelector('.pcharge-fill') as HTMLElement;
-    const charging = mine && !!player?.kickHeld;
-    const power = charging
-      ? Math.max(0, Math.min(1, (player.kickTicks ?? 0) / KICK_CHARGE_TICKS))
-      : 0;
-    charge.style.width = `${power * 100}%`;
 
     if (prevPlateScore[side] && prevPlateScore[side] !== goals) {
       plate.classList.remove('bump');

@@ -2557,16 +2557,6 @@
     .plate .pmeter-fill.low { background: linear-gradient(90deg, #ff3b2e, #ff8c1a); }
     #plate1 .pmeter-fill.low { background: linear-gradient(270deg, #ff3b2e, #ff8c1a); }
     /* Kick power, drawn over the stamina bar while the kick is held. */
-    .plate .pcharge-fill {
-      position: absolute;
-      left: 0;
-      top: 0;
-      height: 100%;
-      width: 0%;
-      background: linear-gradient(90deg, #8cf0ff, #fff);
-      box-shadow: 0 0 8px rgba(140, 240, 255, 0.9);
-    }
-    #plate1 .pcharge-fill { left: auto; right: 0; background: linear-gradient(270deg, #8cf0ff, #fff); }
     .plate .pmeter-fill.full { animation: meterPulse 0.5s infinite alternate; }
     @keyframes meterPulse {
       from { filter: brightness(1); }
@@ -3055,7 +3045,7 @@
           <span class="ppoints"></span>
           <span class="pgames">0</span>
         </div>
-        <span class="pmeter"><span class="pmeter-fill"></span><span class="pcharge-fill"></span></span>
+        <span class="pmeter"><span class="pmeter-fill"></span></span>
       </div>
       <div class="plate" id="plate1">
         <div class="plate-main">
@@ -3065,7 +3055,7 @@
           <span class="ppoints"></span>
           <span class="pgames">0</span>
         </div>
-        <span class="pmeter"><span class="pmeter-fill"></span><span class="pcharge-fill"></span></span>
+        <span class="pmeter"><span class="pmeter-fill"></span></span>
       </div>
       <!-- Match clock + half indicator; main.ts drives both from match.clockTicks. -->
       <div id="matchclock">

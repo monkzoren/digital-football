@@ -151,7 +151,6 @@ let ballLight: THREE.PointLight;
 let shockMesh: THREE.Mesh;
 let shockStart = -1;
 const shockPos = new THREE.Vector3();
-let auraRing: THREE.Mesh;
 // Control markers (see updateControlMarkers): the ring and chevron on the
 // body this client drives, the ring fading on the one it just left, and a
 // dimmer ring per body another human is driving.
@@ -207,8 +206,14 @@ let shakeAmp = 0;
 // replay cam: smoothed look-at that trails the ball through the flight
 let replayLook: THREE.Vector3 | null = null;
 
+// Shake is seasoning, not the meal. The values the call sites pass are the
+// EVENT's weight (a goal is worth more than a slide); this scales the whole
+// system down to something a broadcast camera would plausibly do, and caps it
+// well below the old ceiling so nothing can stack into a screen-shaker.
+const SHAKE_SCALE = 0.22;
+const SHAKE_MAX = 0.5;
 export function addShake(strength: number) {
-  shakeAmp = Math.min(2.2, shakeAmp + strength);
+  shakeAmp = Math.min(SHAKE_MAX, shakeAmp + strength * SHAKE_SCALE);
 }
 
 // Screen-space anchor for DOM overlays (emote pops, speech bubbles): the
@@ -2782,15 +2787,6 @@ function buildScene() {
   shockMesh.rotation.x = -Math.PI / 2;
   shockMesh.visible = false;
   scene3.add(shockMesh);
-  auraRing = new THREE.Mesh(
-    new THREE.RingGeometry(1.5, 2.4, 40),
-    new THREE.MeshBasicMaterial({
-      color: 0xffd040, transparent: true, opacity: 0.4, side: THREE.DoubleSide, depthWrite: false,
-    })
-  );
-  auraRing.rotation.x = -Math.PI / 2;
-  auraRing.visible = false;
-  scene3.add(auraRing);
 
   // Control markers. Each ring carries its own material because they run at
   // different colors and opacities in the same frame; the geometry is small
@@ -3231,18 +3227,6 @@ let prevBallVz = 0;
 let prevPhase = -1;
 let bouncesSinceHit = 0; // only the FIRST bounce of a shot can be a line call
 let lastFrame = 0;
-let lastChargeSpawn = 0; // throttles the finisher-windup particle crackle
-
-
-// charge-up aura palettes [flame, arc]: each finisher rolls one at random so
-// no two buildups look alike — super-saiyan gold, electric storm, blood rage
-const AURA_PALETTES: [number, number][] = [
-  [0xffd040, 0xc060ff],
-  [0x40d0ff, 0xf0ffff],
-  [0xff4020, 0xffa020],
-];
-const chargePalette: number[] = new Array(RIG_COUNT).fill(0); // per-rig palette rolled per charge
-const lastChargeAt: number[] = new Array(RIG_COUNT).fill(-1e9); // per-rig: detects a fresh charge
 
 // ---------------------------------------------------------------------------
 // Control markers
@@ -3446,7 +3430,6 @@ export function drawScene(scene: Scene) {
   prevPhase = scene.phase;
 
   // --- players --------------------------------------------------------------
-  auraRing.visible = false; // re-shown below while a finisher is charging
   for (let slot = 0; slot < playerRigs.length; slot++) {
     const rig = playerRigs[slot];
     // no rigSlot (an older recorded scene): fall back to seat 0 of the side
@@ -3527,33 +3510,6 @@ export function drawScene(scene: Scene) {
       const charge = Math.min(1, (now - rig.windupStart) / (KICK_CHARGE_MS));
       target = kickWindup(pl.kickKind === 1 ? 'chip' : 'drive', charge);
       rate = 22;
-      // a fully wound-up shot flares: the striker glows and the ground ring
-      // pulses, so a screamer being loaded reads from across the pitch
-      if (charge > 0.75) {
-        if (now - lastChargeAt[slot] > 250) {
-          chargePalette[slot] = Math.floor(Math.random() * AURA_PALETTES.length);
-        }
-        lastChargeAt[slot] = now;
-        const [flameCol, arcCol] = AURA_PALETTES[chargePalette[slot]];
-        if (now - lastChargeSpawn > 40) {
-          lastChargeSpawn = now;
-          spawnBurst(
-            new THREE.Vector3(
-              pos.x + Math.sin(now / 31 + side) * 0.7,
-              0.4 + Math.abs(Math.sin(now / 53)) * 1.6,
-              pos.z + Math.cos(now / 41 + side) * 0.7
-            ),
-            flameCol, 2, 5, 0.9, 32
-          );
-        }
-        auraRing.visible = true;
-        auraRing.position.set(pos.x, 0.12, pos.z);
-        const ringPulse = 0.75 + 0.18 * Math.sin(now / 85);
-        auraRing.scale.set(ringPulse, ringPulse, ringPulse);
-        const auraMat = auraRing.material as THREE.MeshBasicMaterial;
-        auraMat.opacity = 0.3 + 0.16 * Math.sin(now / 60);
-        auraMat.color.setHex(Math.sin(now / 150) > 0 ? flameCol : arcCol);
-      }
     } else if (moving) {
       // the lean is a SCREEN-space one, so it reads off the along-pitch axis
       target = runPose(rig.runPhase, pl.dirY * flip);
