@@ -253,10 +253,17 @@ const KEEPER_THROW_RANGE = 46; // anything less is a back-pass to the striker
 //   shootErr     extra kick scatter (radians)
 //   shootChance  per-tick chance it pulls the trigger in range
 //   tackleChance per-tick chance it slides when defending in range
+// tackleChance is rolled EVERY TICK while the ball is in range, so at 30 Hz
+// it compounds fast: the old 0.02 meant a 45% chance of a slide every second
+// a bot was near the ball. That was survivable while a slide could only win
+// the ball or miss — now that catching the man is a foul, it produced two
+// free kicks and a caution inside the first half-minute of every match, and
+// a sending-off before half-time. A slide is a last resort in football and
+// these are per-tick odds, so they belong down here.
 const BOT_LEVELS = [
-  { speed: 0.78, reactErr: 5.0, shootErr: 0.22, shootChance: 0.03, tackleChance: 0.01 },
-  { speed: 0.9, reactErr: 2.4, shootErr: 0.1, shootChance: 0.06, tackleChance: 0.02 },
-  { speed: 1.0, reactErr: 0.8, shootErr: 0.04, shootChance: 0.1, tackleChance: 0.04 },
+  { speed: 0.78, reactErr: 5.0, shootErr: 0.22, shootChance: 0.03, tackleChance: 0.002 },
+  { speed: 0.9, reactErr: 2.4, shootErr: 0.1, shootChance: 0.06, tackleChance: 0.004 },
+  { speed: 1.0, reactErr: 0.8, shootErr: 0.04, shootChance: 0.1, tackleChance: 0.008 },
 ];
 // The keeper reads the same dial. `react` is how much of a shot's flight it
 // gets to see before it commits to the save — a keeper that reads the whole
@@ -265,10 +272,17 @@ const BOT_LEVELS = [
 // `err` is how far off the true crossing point the keeper commits. It is the
 // ONLY thing making a keeper beatable, so it has to exceed the gap between
 // its reach and the corner of the goal.
+// The comment above is a REAL CONSTRAINT and two of these rows were breaking
+// it. A keeper's prediction of where a struck ball crosses the line is exact,
+// so `err` is the only thing that can beat him — and to beat him it has to be
+// larger than the gap between his reach and the post. At level 1 that gap is
+// GOAL_HALF_W - KEEPER_CLEAR_RADIUS*reach = 6.5 - 3.4 = 3.1, and err was 2.6:
+// the DEFAULT keeper was unbeatable except by luck, which is why watching two
+// bot sides play produced attack after attack and no goals.
 const KEEPER_LEVELS = [
-  { speed: 0.62, reach: 0.75, react: 0.14, err: 4.0 },
-  { speed: 0.85, reach: 1.0, react: 0.22, err: 2.6 },
-  { speed: 1.05, reach: 1.15, react: 0.3, err: 1.4 },
+  { speed: 0.62, reach: 0.75, react: 0.14, err: 4.0 }, // gap 3.95
+  { speed: 0.85, reach: 1.0, react: 0.22, err: 3.4 }, // gap 3.10
+  { speed: 1.05, reach: 1.15, react: 0.3, err: 2.8 }, // gap 2.59
 ];
 
 // ---------------------------------------------------------------------------
@@ -3770,6 +3784,9 @@ function botPlay(
 
   let tx: number;
   let ty: number;
+  // The man taking a restart is the one player exempt from the second-man
+  // rule below — standing over the ball IS his job.
+  let amRestartTaker = false;
   if (isPresser && heldBySide < 0) {
     // The one player allowed to go to the ball — but not while it is in a
     // keeper's hands, when there is nothing to press.
@@ -3818,9 +3835,18 @@ function botPlay(
       // certain, one long up the line. Before this they carried on holding
       // their block anchor, which is why a throw-in had nobody to throw to.
       const taker = takerOf(mates, bot, match.restartX, match.restartY);
-      if (!sameId(taker.identity, bot.identity)) {
+      if (sameId(taker.identity, bot.identity)) {
+        // I AM THE TAKER. Stand over the ball. Without this the taker fell
+        // through to his formation anchor and was then shoved away from the
+        // ball by the second-man rule below — so a restart awarded to a side
+        // with no human on it was never taken by anyone, and play only
+        // resumed when the grace expired and the ball went loose.
+        tx = match.restartX;
+        ty = match.restartY;
+        amRestartTaker = true;
+      } else {
         const up = attackSign(bot.side);
-        const wide = match.restartX >= 0 ? -1 : 1; // show on the far side
+        const wide = flankOf(bot); // his flank, so the option does not flip
         const short = bot.teamSlot % 2 === 0;
         const reach = short ? OPTION_SHORT : OPTION_LONG;
         tx = clamp(match.restartX + wide * reach * 0.55, -(PITCH_HALF_WID - 4), PITCH_HALF_WID - 4);
@@ -3830,7 +3856,12 @@ function botPlay(
       // OUR KEEPER HAS IT. Break wide and get outside the area to be thrown
       // to — do not stand in front of him.
       const gl = sideSign(bot.side) * PITCH_HALF_LEN;
-      tx = (bot.x >= 0 ? 1 : -1) * (PITCH_HALF_WID - 8);
+      // Which flank a man shows on comes from WHO HE IS, never from where he
+      // happens to be standing. Keying it off bot.x >= 0 meant the target
+      // flipped from one touchline to the other the instant he crossed the
+      // middle, so he turned round and ran back — over and over. That is the
+      // "players run frantically left and right" everyone sees.
+      tx = flankOf(bot) * (PITCH_HALF_WID - 8);
       ty = gl - sideSign(bot.side) * (BOX_DEPTH + 8);
     } else if (heldBySide >= 0) {
       // THEIR KEEPER HAS IT. There is nothing to win: drop into shape rather
@@ -3843,12 +3874,13 @@ function botPlay(
       const supporting =
         Math.hypot(bot.x - carrier.x, bot.y - carrier.y) <
         Math.hypot(bot.x - carrier.x, bot.y - (carrier.y + up * ADVANCE_AHEAD));
-      const side = bot.x >= carrier.x ? 1 : -1;
+      // Same rule: the flank is the man's, not his current position's.
+      const flank = flankOf(bot);
       if (supporting) {
-        tx = clamp(carrier.x + side * 12, -(PITCH_HALF_WID - 4), PITCH_HALF_WID - 4);
+        tx = clamp(carrier.x + flank * 12, -(PITCH_HALF_WID - 4), PITCH_HALF_WID - 4);
         ty = clamp(carrier.y - up * SUPPORT_BEHIND, -(PITCH_HALF_LEN - 5), PITCH_HALF_LEN - 5);
       } else {
-        tx = clamp(carrier.x + side * 15, -(PITCH_HALF_WID - 4), PITCH_HALF_WID - 4);
+        tx = clamp(carrier.x + flank * 15, -(PITCH_HALF_WID - 4), PITCH_HALF_WID - 4);
         ty = clamp(carrier.y + up * ADVANCE_AHEAD, -(PITCH_HALF_LEN - 5), PITCH_HALF_LEN - 5);
       }
     }
@@ -3873,7 +3905,7 @@ function botPlay(
     // bubble. Structural, not advisory — it holds no matter what the duty
     // logic above decided.
     const bd = Math.hypot(tx - ball.x, ty - ball.y);
-    if (bd < AI_PRESS_BUBBLE && bd > 0.01) {
+    if (!amRestartTaker && bd < AI_PRESS_BUBBLE && bd > 0.01) {
       tx = ball.x + ((tx - ball.x) / bd) * AI_PRESS_BUBBLE;
       ty = ball.y + ((ty - ball.y) / bd) * AI_PRESS_BUBBLE;
     }
@@ -3959,6 +3991,17 @@ function interceptPoint(
     if (Math.hypot(bx - px, by - py) <= speed * t) return { x: bx, y: by, t };
   }
   return { x: bx, y: by, t: 2 };
+}
+
+/**
+ * Which flank a player belongs to: -1 left, +1 right, and for the forward,
+ * whichever his slot implies. It is derived from teamSlot — a STABLE property
+ * — because any off-ball target computed from the man's current position
+ * flips the moment he crosses the reference line, and a flipping target makes
+ * him sprint back and forth across the pitch instead of taking up a position.
+ */
+function flankOf(p: PlayerRow): number {
+  return p.teamSlot % 2 === 0 ? -1 : 1;
 }
 
 /** The man on this side nearest the restart spot — the one who will take it. */
@@ -4496,12 +4539,18 @@ export const game_tick = spacetimedb.reducer(
               let tx: number;
               let ty: number;
               if (match.restartKind === RK_THROWIN) {
-                // behind the touchline, facing in — where a thrower stands
-                tx = outX * (PITCH_HALF_WID + 1);
+                // JUST INSIDE THE LINE, not behind it. Standing the taker
+                // outside the pitch put the ball between him and the field,
+                // so his very first touch knocked it straight back out — the
+                // throw-in was immediately awarded to the other side, and the
+                // two teams ping-ponged throw-ins at each other a second
+                // apart. The letter of the law puts a thrower outside; a
+                // playable game puts him on the line.
+                tx = outX * (PITCH_HALF_WID - 1.5);
                 ty = match.restartY;
               } else if (match.restartKind === RK_CORNER) {
-                tx = outX * (PITCH_HALF_WID + 1);
-                ty = outY * (PITCH_HALF_LEN + 1);
+                tx = outX * (PITCH_HALF_WID - 1.5);
+                ty = outY * (PITCH_HALF_LEN - 1.5);
               } else {
                 // a step behind the ball, on the side away from the goal we
                 // are attacking, so the first touch is forward
@@ -4773,8 +4822,18 @@ export const game_tick = spacetimedb.reducer(
             continue;
           }
           const len = d || 1;
+          // STEER ON mv. This wrote dirX/dirY only — the RENDERED FACING —
+          // and the integrator moves a bot along mvX/mvY, so the stand-in
+          // taker turned to look at the ball and then stood there forever.
+          // A kickoff nobody takes never starts, so the match sat at 0:00
+          // with the clock stopped: exactly the freeze this branch exists to
+          // prevent. The station-walk branch below always got this right,
+          // which is why everyone else drifted into shape around a taker who
+          // never moved.
           ctx.db.player.identity.update({
             ...cur,
+            mvX: (ball.x - cur.x) / len,
+            mvY: (ball.y - cur.y) / len,
             dirX: Math.abs(ball.x - cur.x) > 0.5 ? Math.sign(ball.x - cur.x) : 0,
             dirY: Math.abs(ball.y - cur.y) > 0.5 ? Math.sign(ball.y - cur.y) : 0,
           });
