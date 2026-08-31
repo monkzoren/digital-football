@@ -237,11 +237,13 @@ const KEEPER_CLEAR_SPEED = 62;
 // for a beat and then picks a pass. Real football, and it also gives the
 // defending side a moment to breathe after a save.
 const KEEPER_HOLD = ticks(1.3);
-// A human on the gloves gets the six seconds the laws actually allow, and
-// then the keeper plays it anyway. Without a ceiling, a player who does not
-// press anything (or does not realise they have been given the keeper)
-// freezes the match with the ball in their hands, forever.
-const KEEPER_HOLD_HUMAN = ticks(6);
+// A human on the gloves gets FOUR seconds — the small-sided law, not the
+// eleven-a-side six — and then the keeper plays it anyway. Four is also what
+// keeps a 4v4 match moving: the whole point of the futsal clock is that
+// possession in the gloves is not a rest. Without a ceiling, a player who
+// does not press anything (or does not realise they have been given the
+// keeper) freezes the match with the ball in their hands, forever.
+const KEEPER_HOLD_HUMAN = ticks(4);
 // A throw finds a team-mate; anything longer gets hit.
 const KEEPER_THROW_RANGE = 46; // anything less is a back-pass to the striker
 
@@ -3252,7 +3254,7 @@ function bindPilot(ctx: Ctx, me: PlayerRow, from: PlayerRow, to: PlayerRow, lock
     // clear the AI's heading with the same write, or it survives the handover
     mvX: stickX, mvY: stickY,
     sprinting: sprint,
-    // taking over a keeper mid-catch buys the full six seconds to pick a pass
+    // taking over a keeper mid-catch buys the full four seconds to pick a pass
     holdTicks:
       target.role === ROLE_KEEPER && target.holdTicks > 0
         ? KEEPER_HOLD_HUMAN
