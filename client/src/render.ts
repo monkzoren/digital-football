@@ -1162,11 +1162,10 @@ const KITS: Kit[] = [
 // Keeper kit — lime shirt, dark shorts, white gloves, so the one body per
 // side that may handle the ball reads as the keeper from the halfway line.
 // It overrides the team kit, which is why both sides' keepers look alike.
-const KEEPER_SHORTS_MAT = new THREE.MeshLambertMaterial({ color: 0x1b2030 });
 const KEEPER_KIT: Kit = {
   shirt: 0xc8f000,
   trim: 0x1b2030,
-  shorts: KEEPER_SHORTS_MAT,
+  shorts: new THREE.MeshLambertMaterial({ color: 0x1b2030 }),
   socks: new THREE.MeshLambertMaterial({ color: 0x1b2030 }),
   marker: 0xc8f000,
 };
@@ -3326,13 +3325,6 @@ function updateControlMarkers(scene: Scene, now: number) {
     markerFocusAt = now;
   }
   const focus = markerRig(scene.focusSlot);
-  if (now - (globalThis as any).__mkLog > 2000 || !(globalThis as any).__mkLog) {
-    (globalThis as any).__mkLog = now;
-    console.log('MK others=', JSON.stringify(scene.otherPilotSlots), 'used=', used,
-      'focus=', scene.focusSlot, 'ghost=', scene.ghostSlot,
-      'vis=', playerRigs.map(r => (r.root.visible ? 1 : 0)).join(''),
-      'sides=', playerRigs.map(r => r.kitSide).join(''));
-  }
   if (!focus) return;
   const col = markerColor(focus);
   // the pop: the ring lands oversized and snaps in over FOCUS_POP_MS, which
