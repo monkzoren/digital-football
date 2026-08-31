@@ -49,14 +49,28 @@ tournaments, betting, chat, graphics) carried over. Key facts:
     or timed. Passing is ASSISTED: the stick picks a direction and
     `pickPassTarget` finds the man, because aiming a pass at raw eight-way
     degrees is what made passing feel awful.
-  - The client mirrors PLAYER_SPEED in `client/src/config.ts` and dead-reckons
-    with it. It has drifted out of sync twice, and both times the symptom was
-    "the game feels jittery" — check it whenever a speed changes.
+  - The client mirrors PLAYER_SPEED and SPRINT_MUL in `client/src/config.ts`
+    and dead-reckons with them. They have drifted out of sync three times,
+    and every time the symptom was "the game feels jittery" — check them
+    whenever a speed changes, and never declare a second copy anywhere else
+    (SPRINT_MUL drifted precisely because it lived in `main.ts`, where the
+    config.ts warning was not looking).
+  - The render smoother in `renderPosition` exists to hide the 30 Hz step in
+    OTHER people's rows. On the body your own stick drives it is pure added
+    latency — that is why it runs at rate 34 there and 11 elsewhere. Raising
+    the shared rate to "smooth things out" makes the controls feel floaty.
   - Exactly one player per side may approach the ball: the elected presser
     (`match.presser0/1`, with hysteresis). Everyone else is pushed out of
     `AI_PRESS_BUBBLE`. That rule is what prevents the under-8s huddle.
-  - Possession is a real model: the ball sticks to `ball.ownerId` inside a
-    control radius and is knocked ahead of their run. Ball deceleration is
+  - Possession is a TOUCH CYCLE, not a magnet. The owner knocks the ball
+    ahead only when he has caught up to it (`gap < TOUCH_TRIGGER`); between
+    touches nothing writes the ball's position — it rolls under the
+    integrator and is genuinely loose, which is what lets a defender reach
+    it and what makes a heavy touch run out of play. Do NOT go back to
+    pinning it to an offset: that kills the risk, and a velocity-less ball
+    cannot be interpolated by the client either, so it strobes.
+    `CONTROL_KEEP_RADIUS` must stay comfortably beyond the knock distance —
+    chasing your own touch IS dribbling. Ball deceleration is
     quadratic AIR DRAG (`BALL_DRAG`) plus constant rolling resistance —
     rolling resistance alone is right for a slow ball and sends a struck one
     750 units down a 132-unit pitch. A struck ball sets
@@ -76,6 +90,29 @@ tournaments, betting, chat, graphics) carried over. Key facts:
     gap between `KEEPER_CLEAR_RADIUS` and the corner of the goal.
   - A kickoff nobody takes freezes the match forever, so after
     `KICKOFF_AUTO` a team-mate steps in and takes it.
+  - **Laws.** A slide that reaches a man without having taken the ball is a
+    foul (ball first — a tackle that won it is fair however many it caught):
+    free kick, or a penalty inside the offender's own area, taken with the
+    box cleared. A caution is only for fouling a player who ACTUALLY HAD the
+    ball; two is a red. A sent-off body must be excluded from every list
+    that says who is on the pitch — AI shape, press election, possession
+    `eligible`, pass targets, switch candidates, restart taker — and
+    `controlledBody` must hand the seat a different body, or the stick
+    drives a man on the touchline for the rest of the match.
+  - **The back-pass law** rides on `ball.fromKick`: set in `executeKick`
+    (outfielders only) and explicitly cleared at EVERY other touch, because a
+    `{...ball}` spread would otherwise carry it forward forever. The keeper's
+    catch is gated on it. He can still play it with his feet — that is the
+    point of the law.
+  - **Locomotion is a blend tree, not one animation.** `runPose` blends jog →
+    sprint on MEASURED ground speed, and the stride CADENCE is derived from
+    the stride LENGTH (`strideRateFor`) — fix the cadence instead and the
+    feet skate. `moving` means covering ground, not holding the stick.
+  - **The camera is a long lens from well back** (19° FOV, boom ≥ 1.63 ×
+    PITCH_HALF_LEN). A close wide camera cannot aim at the far side without
+    the gantry standing on the pitch, so the aim gets pinned to its own
+    touchline and every body piles into the top of the frame. Boom limits are
+    set from what a player must SEE, not from how the rig looks.
 - Betting lives in the same two files: the `wallet`/`bet`/`book` tables +
   `place_bet` in the module, the BETS panel and pitchside bar in
   `client/src/main.ts`. Odds are server-authoritative — the client only
