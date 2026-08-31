@@ -477,6 +477,12 @@ const Match = table(
     // Identity, to keep toHexString out of the 30 Hz path.
     presser0: t.u8().default(255),
     presser1: t.u8().default(255),
+    // NOTE: appended — TRANSITION MEMORY. Football's sharpest moments are the
+    // seconds either side of a turnover: the side that just lost it swarms
+    // the ball back, the side that just won it breaks. Neither is possible
+    // without knowing that possession CHANGED, which needs a tick of memory.
+    possSide: t.u8().default(255), // 255 = loose
+    transTicks: t.u8().default(0), // counts down from a turnover
   }
 );
 
@@ -1056,6 +1062,11 @@ const AI_PRESS_BUBBLE = PITCH_HALF_WID * 0.21;
 const AI_ZONE_LEASH = PITCH_HALF_LEN * 0.35;
 // Team-mates repel each other at this range, so two men never occupy one spot.
 const AI_SEPARATION_R = PITCH_HALF_WID * 0.29;
+// How long the sharp end of a turnover lasts. For this window the side that
+// just lost the ball hunts it instead of retreating, and the side that just
+// won it runs forward instead of settling — which is what makes a turnover
+// feel like a moment rather than a bookkeeping change.
+const TRANSITION_TICKS = ticks(2.2);
 // Seconds of advantage the incumbent presser keeps, so the job stops flapping.
 const PRESS_HYST = 0.12;
 // The longest pass a bot will attempt.
@@ -1223,6 +1234,8 @@ function createMatch(
     haltName: '',
     presser0: 255,
     presser1: 255,
+    possSide: 255,
+    transTicks: 0,
   });
   openBook(ctx, lobby, row);
   return row;
@@ -3887,12 +3900,21 @@ function botPlay(
     }
   }
 
+  // Do WE have the ball? A team in possession has nobody to press — the man
+  // nearest the ball is his own team-mate.
+  const weHaveIt = ball.hasOwner && possSide === bot.side;
+
   let tx: number;
   let ty: number;
   // The man taking a restart is the one player exempt from the second-man
   // rule below — standing over the ball IS his job.
   let amRestartTaker = false;
-  if (isPresser && heldBySide < 0) {
+  if (isPresser && heldBySide < 0 && !weHaveIt) {
+    // PRESS — only when the ball is not ours. The elected presser used to run
+    // at the ball whoever had it, so on our own attack our own presser chased
+    // our own carrier: two of three attackers inside the ball's bubble, one
+    // of them shadowing the man he was supposed to be giving an option to.
+    // Measured before this: s0 ATTACK bubble=2/3 ahead=1 behind=0.
     // The one player allowed to go to the ball — but not while it is in a
     // keeper's hands, when there is nothing to press.
     tx = ball.x + ball.vx * 0.25 + noise(1) * lvl.reactErr;
@@ -3926,6 +3948,21 @@ function botPlay(
     const ourRestart = restartPending && match.restartSide === bot.side;
     const carrier = ball.hasOwner ? [...mates].find(m => sameId(m.identity, ball.ownerId)) : undefined;
     const weOwn = possSide === bot.side && (ball.hasOwner || restartPending);
+    // TEAM PHASE. A turnover opens a short window in which both sides should
+    // do something other than settle: the side that lost it hunts, the side
+    // that won it runs.
+    const trans = match.transTicks > 0;
+    const counterPress = trans && ball.hasOwner && possSide !== bot.side;
+    const breakAway = trans && possSide === bot.side;
+    // Where I stand in my own team's queue for the ball — 0 is nearest. The
+    // elected presser is handled above, so this decides who does the SECOND
+    // job (cover, or join a counter-press) and who does the third (mark).
+    let pressRank = 0;
+    const myBallD = Math.hypot(ball.x - bot.x, ball.y - bot.y);
+    for (const m of mates) {
+      if (m.role !== ROLE_OUTFIELD || m.sentOff) continue;
+      if (Math.hypot(ball.x - m.x, ball.y - m.y) < myBallD) pressRank++;
+    }
 
     if (restartPending && !ourRestart) {
       // THEIR RESTART. Stand off it — the laws say five metres — and get
@@ -3972,21 +4009,93 @@ function botPlay(
       // THEIR KEEPER HAS IT. There is nothing to win: drop into shape rather
       // than standing over him waiting for a drop that the law will not give.
       ty = ty * 0.5 + myGoal * 0.5;
-    } else if (weOwn && carrier) {
-      // WE HAVE IT. One man SUPPORTS from behind the ball so there is always
-      // a safe pass backwards, the other ADVANCES beyond it to stretch them.
+    } else if (weOwn && carrier && !breakAway) {
+      // ---- ATTACKING SHAPE -------------------------------------------------
+      // Two men off the ball, and they must not do the same job. One RUNS
+      // BEYOND the carrier to stretch the defence and be the ball in behind;
+      // the other holds a SHORT ANGLE behind and across, so there is always a
+      // safe pass that keeps possession. Which man does which is decided by
+      // who is already further forward, so nobody turns round to swap.
       const up = attackSign(bot.side);
-      const supporting =
-        Math.hypot(bot.x - carrier.x, bot.y - carrier.y) <
-        Math.hypot(bot.x - carrier.x, bot.y - (carrier.y + up * ADVANCE_AHEAD));
-      // Same rule: the flank is the man's, not his current position's.
+      const myAdv = (bot.y - carrier.y) * up; // + = already ahead of the ball
+      let mateAdv = -999;
+      for (const m of mates) {
+        if (m.role !== ROLE_OUTFIELD || sameId(m.identity, carrier.identity)) continue;
+        mateAdv = Math.max(mateAdv, (m.y - carrier.y) * up);
+      }
+      const iRunBeyond = myAdv >= mateAdv;
       const flank = flankOf(bot);
-      if (supporting) {
-        tx = clamp(carrier.x + flank * 12, -(PITCH_HALF_WID - 4), PITCH_HALF_WID - 4);
-        ty = clamp(carrier.y - up * SUPPORT_BEHIND, -(PITCH_HALF_LEN - 5), PITCH_HALF_LEN - 5);
-      } else {
-        tx = clamp(carrier.x + flank * 15, -(PITCH_HALF_WID - 4), PITCH_HALF_WID - 4);
+      if (iRunBeyond) {
+        // The run in behind. Held WIDE of the carrier so the pass has a lane,
+        // and pushed toward goal — but never so far that he is stranded
+        // upfield when the ball is lost.
+        tx = clamp(carrier.x + flank * 16, -(PITCH_HALF_WID - 4), PITCH_HALF_WID - 4);
         ty = clamp(carrier.y + up * ADVANCE_AHEAD, -(PITCH_HALF_LEN - 5), PITCH_HALF_LEN - 5);
+        // In the final third, attack the far post instead of holding width.
+        if (Math.abs(carrier.y - up * PITCH_HALF_LEN) < BOX_DEPTH + 10) {
+          tx = clamp(-Math.sign(carrier.x || 1) * GOAL_HALF_W, -BOX_HALF_W, BOX_HALF_W);
+          ty = clamp(up * (PITCH_HALF_LEN - 8), -(PITCH_HALF_LEN - 5), PITCH_HALF_LEN - 5);
+        }
+      } else {
+        // The short angle. BEHIND the ball and off to the side — a team-mate
+        // level with the carrier is not an option, he is a second carrier.
+        tx = clamp(carrier.x + flank * 13, -(PITCH_HALF_WID - 4), PITCH_HALF_WID - 4);
+        ty = clamp(carrier.y - up * SUPPORT_BEHIND, -(PITCH_HALF_LEN - 5), PITCH_HALF_LEN - 5);
+      }
+    } else if (counterPress) {
+      // ---- WE JUST LOST IT -------------------------------------------------
+      // The two nearest men hunt the ball for a couple of seconds rather than
+      // trooping back into shape. This is the one place the second-man rule is
+      // deliberately suspended: swarming the ball IS the tactic, and winning
+      // it back here is worth more than the shape it costs. The third man does
+      // NOT join — he drops and covers the space behind, so a counter-press
+      // that fails is not an open goal.
+      if (pressRank < 1) {
+        tx = ball.x;
+        ty = ball.y;
+        amRestartTaker = true; // reuse the bubble exemption
+      } else {
+        tx = clamp(ball.x * 0.4, -(PITCH_HALF_WID - 5), PITCH_HALF_WID - 5);
+        ty = ball.y * 0.35 + myGoal * 0.65;
+      }
+    } else if (breakAway) {
+      // ---- WE JUST WON IT --------------------------------------------------
+      // Get up the pitch. A team that wins the ball and then walks into shape
+      // has thrown away the only moment the opposition is out of theirs.
+      tx = clamp(flankOf(bot) * (PITCH_HALF_WID - 10), -(PITCH_HALF_WID - 5), PITCH_HALF_WID - 5);
+      ty = clamp(ball.y + attackSign(bot.side) * 26, -(PITCH_HALF_LEN - 6), PITCH_HALF_LEN - 6);
+    } else {
+      // ---- DEFENDING -------------------------------------------------------
+      // The presser is handled above. These are the other two, and standing on
+      // a formation anchor is not defending. The nearer of them COVERS: he
+      // takes the line between the ball and our goal, goal-side, so a man who
+      // beats the presser still has someone in front of him. The last one
+      // MARKS the most dangerous opponent — the one furthest up the pitch —
+      // by standing goal-side of him rather than next to him.
+      const covering = pressRank <= 1;
+      if (covering) {
+        const gx = 0;
+        const gy = myGoal;
+        const dxg = gx - ball.x;
+        const dyg = gy - ball.y;
+        const dg = Math.hypot(dxg, dyg) || 1;
+        const back = Math.min(COVER_DEPTH, dg * 0.5);
+        tx = clamp(ball.x + (dxg / dg) * back, -(PITCH_HALF_WID - 4), PITCH_HALF_WID - 4);
+        ty = clamp(ball.y + (dyg / dg) * back, -(PITCH_HALF_LEN - 4), PITCH_HALF_LEN - 4);
+      } else {
+        let danger: PlayerRow | null = null;
+        for (const f of foes) {
+          if (f.role !== ROLE_OUTFIELD || f.sentOff) continue;
+          if (!danger || (f.y - danger.y) * -sideSign(bot.side) > 0) danger = f;
+        }
+        if (danger) {
+          // goal-side and a stride off him: close enough to intercept, not so
+          // close that a turn beats you
+          const dxm = myGoal - danger.y;
+          const sgn = Math.sign(dxm) || 1;
+          tx = clamp(danger.x * 0.85, -(PITCH_HALF_WID - 4), PITCH_HALF_WID - 4);
+          ty = clamp(danger.y + sgn * MARK_GOALSIDE, -(PITCH_HALF_LEN - 4), PITCH_HALF_LEN - 4);
+        }
       }
     }
 
@@ -4013,6 +4122,21 @@ function botPlay(
     if (!amRestartTaker && bd < AI_PRESS_BUBBLE && bd > 0.01) {
       tx = ball.x + ((tx - ball.x) / bd) * AI_PRESS_BUBBLE;
       ty = ball.y + ((ty - ball.y) / bd) * AI_PRESS_BUBBLE;
+    }
+
+    // THE SUPPORT RULE — the attacking twin of the second-man rule, and just
+    // as structural. A team-mate standing next to the man on the ball is not
+    // an option, he is a second carrier: he occupies the space the pass would
+    // go into and brings a marker with him. Measured before this, an
+    // attacking side had two of its three men inside the ball's bubble with
+    // nobody behind it. Whatever the duty logic decided, an off-ball man in
+    // possession keeps his distance from the carrier.
+    if (carrier && !sameId(carrier.identity, bot.identity)) {
+      const cd = Math.hypot(tx - carrier.x, ty - carrier.y);
+      if (cd < ATTACK_SPACING && cd > 0.01) {
+        tx = carrier.x + ((tx - carrier.x) / cd) * ATTACK_SPACING;
+        ty = carrier.y + ((ty - carrier.y) / cd) * ATTACK_SPACING;
+      }
     }
   }
   // CLEAR THE AREA. While a keeper has the ball in its hands the penalty box
@@ -4054,6 +4178,15 @@ function botPlay(
 // How far a man stands off the ball at an opponent's restart. Futsal says 5
 // metres; this pitch is scaled so a metre is about 3.3 units.
 const RESTART_RETREAT = 16;
+// How far goal-side of the ball the covering defender sits. Close enough to
+// be the next man if the presser is beaten, deep enough that a ball played
+// past the presser does not also go past him.
+const COVER_DEPTH = 14;
+// The closest an off-ball team-mate may set up to the man on the ball.
+const ATTACK_SPACING = 13;
+// A marker stands this far goal-side of his man: near enough to intercept,
+// far enough that a turn does not beat him.
+const MARK_GOALSIDE = 3.5;
 // A short option for a restart: close enough to be a certain pass.
 const OPTION_SHORT = 13;
 // The long option, up the line.
@@ -4813,6 +4946,23 @@ export const game_tick = spacetimedb.reducer(
     const carrier =
       ball && ball.hasOwner ? players.find(q => sameId(q.identity, ball!.ownerId)) : undefined;
     const possSide = carrier ? carrier.side : ball ? ball.lastTouchSide : 0;
+    // TURNOVER DETECTION. A side only counts as having the ball while someone
+    // is actually carrying it; a loose ball keeps the previous holder, so a
+    // clearance is not mistaken for a turnover. When the carrier's side
+    // changes, both teams get a window to react to it.
+    {
+      const holder = carrier ? carrier.side : 255;
+      if (holder !== 255 && match.possSide !== 255 && holder !== match.possSide) {
+        match = { ...match, possSide: holder, transTicks: TRANSITION_TICKS };
+        ctx.db.match.id.update(match);
+      } else if (holder !== 255 && holder !== match.possSide) {
+        match = { ...match, possSide: holder };
+        ctx.db.match.id.update(match);
+      } else if (match.transTicks > 0) {
+        match = { ...match, transTicks: match.transTicks - 1 };
+        ctx.db.match.id.update(match);
+      }
+    }
     if (ball && match.phase === PHASE_LIVE) {
       const elected = electPresser(ctx, match, ball, outBySide);
       if (elected !== match) {

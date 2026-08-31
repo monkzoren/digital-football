@@ -175,6 +175,8 @@ export const Match = __t.object("Match", {
   haltName: __t.string(),
   presser0: __t.u8(),
   presser1: __t.u8(),
+  possSide: __t.u8(),
+  transTicks: __t.u8(),
 });
 export type Match = __Infer<typeof Match>;
 

@@ -42,4 +42,6 @@ export default __t.row({
   haltName: __t.string().name("halt_name"),
   presser0: __t.u8().name("presser_0"),
   presser1: __t.u8().name("presser_1"),
+  possSide: __t.u8().name("poss_side"),
+  transTicks: __t.u8().name("trans_ticks"),
 });
