@@ -101,11 +101,20 @@ const TOUCH_AHEAD = 3.2; // ~1 m knock in front of the runner
 // leaves your boot. Between touches the ball is genuinely loose: it carries
 // its own velocity, drag slows it, and a defender can get to it. That gap is
 // the whole reason a dribble is a risk rather than a guarantee.
-const TOUCH_TRIGGER = 1.9;
-const TOUCH_KNOCK = 9.0;
+const TOUCH_TRIGGER = 2.0;
+// How much faster than the runner the ball leaves his boot. This has to be
+// small: the ball only has to get back in FRONT of him, and every unit of it
+// is distance he then has to make up before the next touch. At 9 the ball
+// outran the man by more than the radius he can keep it in.
+const TOUCH_KNOCK = 4.5;
 // Standing still, the ball settles at your feet instead of rolling away.
 const SETTLE_DAMP = 0.55;
-const CONTEST_CHANCE = 0.05; // per tick, standing challenge inside the radius
+// Per TICK, at 30 Hz — so 0.05 is not a 5% chance, it is a 78% chance PER
+// SECOND that any opponent standing near the ball simply takes it off you.
+// With a presser always converging, that made keeping the ball for more than
+// about a second impossible: measured, a received pass survived 0.75s.
+// Dribbling has to be losable, not doomed.
+const CONTEST_CHANCE = 0.008; // ~21% per second in the radius
 
 // How long a struck ball is out of its kicker's reach (see Ball.lockTicks).
 const KICK_LOCK = ticks(0.3);
@@ -5249,6 +5258,11 @@ export const game_tick = spacetimedb.reducer(
         const dx = ball.x - owner.x;
         const dy = ball.y - owner.y;
         const gap = Math.hypot(dx, dy);
+        // how fast this man is actually travelling, in world units
+        const ownSpeedNow =
+          Math.hypot(owner.velX, owner.velY) * PLAYER_SPEED *
+          charStat(owner.characterId).speed * (owner.sprinting ? SPRINT_MUL : 1) *
+          DRIBBLE_MUL;
         // FIRST TOUCH. Taking the ball is an action, not a state change. The
         // touch cycle only writes a velocity once you have CAUGHT UP to the
         // ball, so a pass arriving at 30 units/s kept every bit of its pace
@@ -5287,18 +5301,33 @@ export const game_tick = spacetimedb.reducer(
             vy: ball.vy * (1 - SETTLE_DAMP),
             vz: 0,
           };
-        } else if (gap < TOUCH_TRIGGER) {
-          // Caught up to it — put the next touch in. The knock goes along the
-          // run, with a small correction so the ball comes back in front of
-          // the boot rather than drifting off a shoulder.
-          const ownSpeed = Math.hypot(owner.velX, owner.velY) * PLAYER_SPEED *
-            charStat(owner.characterId).speed * (owner.sprinting ? SPRINT_MUL : 1);
-          const knock = ownSpeed * DRIBBLE_MUL + TOUCH_KNOCK;
-          const cx = gap > 0.01 ? dx / gap : fx;
-          const cy = gap > 0.01 ? dy / gap : fy;
-          const ax = fx * 0.8 + cx * 0.2;
-          const ay = fy * 0.8 + cy * 0.2;
+        } else if (
+          dx * fx + dy * fy < TOUCH_TRIGGER &&
+          Math.hypot(ball.vx, ball.vy) < ownSpeedNow * 1.05
+        ) {
+          // THE NEXT TOUCH — and only when he has actually CAUGHT the ball.
+          //
+          // Two things were wrong here and the trace showed both. The knock
+          // re-fired on every tick the ball was not far enough ahead, which
+          // held it at a constant 17.7 units/s against a runner doing 13.2 —
+          // a ball being continuously re-accelerated away from the man
+          // chasing it, so it could never be caught and possession died the
+          // moment it crossed CONTROL_KEEP_RADIUS. A touch is an EVENT: it
+          // only goes in once the ball has slowed to his pace.
+          //
+          // And the aim was backwards. It steered along `f` plus a fifth of
+          // the vector FROM the player TO the ball — which points at where
+          // the ball has already drifted, so every touch pushed it further
+          // off line. Measured: 5.4 units of gap with only 2.2 of it ahead,
+          // i.e. nearly 5 units square of him. Aiming at a spot directly in
+          // front of the runner instead pulls the ball back into his path,
+          // which is what the old comment claimed to do and did not.
+          const spotX = owner.x + fx * TOUCH_AHEAD;
+          const spotY = owner.y + fy * TOUCH_AHEAD;
+          const ax = spotX - ball.x;
+          const ay = spotY - ball.y;
           const al = Math.hypot(ax, ay) || 1;
+          const knock = ownSpeedNow + TOUCH_KNOCK;
           ball = {
             ...ball,
             vx: (ax / al) * knock,
@@ -5316,6 +5345,13 @@ export const game_tick = spacetimedb.reducer(
           lastTouchSide: owner.side,
           lastTouchId: owner.identity,
           fromKick: false, // taking it under control clears the back-pass
+          // A NEW TOUCH ENDS THE STRIKER'S LOCK. Without this the receiver of
+          // a pass locked HIMSELF out of the ball he had just taken: the
+          // kick's lockTicks was still counting down, lastTouchId had just
+          // been rewritten to the receiver, so `eligible` refused to let him
+          // own it and possession was dropped a moment after he got it. The
+          // trap branch above always cleared it; this one never did.
+          lockTicks: 0,
         };
         match = clearGraceOnTouch(ctx, match, owner.side);
       }
