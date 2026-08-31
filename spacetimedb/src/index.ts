@@ -44,7 +44,11 @@ const GOAL_PAUSE = ticks(7.5);
 const RESTART_PAUSE = ticks(1.4); // throw-in / corner / goal kick placement
 const HALFTIME_PAUSE = ticks(6);
 const COUNTDOWN_TICKS = ticks(3); // 3-2-1 before the first kickoff
-const RESTART_GRACE = ticks(1.6); // only the awarded side may play the ball
+// Only the awarded side may play the ball, and it is also the window in which
+// the restart can be TAKEN. 1.6s was a race: the taker had to reach the ball
+// and pick a pass before it expired. Standing over the ball he now needs only
+// enough time to look up, which is what a real throw-in takes.
+const RESTART_GRACE = ticks(4);
 // If the human who should restart just stands there, a team-mate steps up
 // and takes it. Without this, a player who concedes and then does nothing
 // freezes the match for everyone, permanently.
@@ -4287,6 +4291,46 @@ export const game_tick = spacetimedb.reducer(
               // could not pick up before the whistle, he can after it
               fromKick: false,
             });
+          }
+          // PUT THE TAKER ON THE BALL. Nothing moved him there before, so a
+          // corner or a throw-in meant jogging twenty units to the flag or the
+          // touchline while the 1.6-second grace ran down — and the moment it
+          // expired `takingRestart` went false and the restart could no longer
+          // be taken at all. Goal kicks hid the bug, because the man who takes
+          // one is the deepest defender and he is already standing there.
+          //
+          // A footballer does not race his own restart. He stands over the
+          // ball: outside the line for a throw-in and at the flag for a
+          // corner, which is where the laws put him anyway, and a step behind
+          // it for everything else.
+          if (match.restartKind !== RK_DROP && match.restartKind !== RK_PENALTY) {
+            const taker = restartTaker(ctx, match);
+            if (taker) {
+              const outX = Math.sign(match.restartX) || 1;
+              const outY = Math.sign(match.restartY) || 1;
+              let tx: number;
+              let ty: number;
+              if (match.restartKind === RK_THROWIN) {
+                // behind the touchline, facing in — where a thrower stands
+                tx = outX * (PITCH_HALF_WID + 1);
+                ty = match.restartY;
+              } else if (match.restartKind === RK_CORNER) {
+                tx = outX * (PITCH_HALF_WID + 1);
+                ty = outY * (PITCH_HALF_LEN + 1);
+              } else {
+                // a step behind the ball, on the side away from the goal we
+                // are attacking, so the first touch is forward
+                tx = match.restartX;
+                ty = match.restartY + sideSign(match.restartSide) * 2.2;
+              }
+              ctx.db.player.identity.update({
+                ...taker,
+                x: clamp(tx, -P_BOUNDS_X, P_BOUNDS_X),
+                y: clamp(ty, -P_BOUNDS_Y, P_BOUNDS_Y),
+                mvX: 0, mvY: 0, velX: 0, velY: 0,
+                kickHeld: false, kickTicks: 0, slideTicks: 0,
+              });
+            }
           }
           // A PENALTY is taken with the area cleared: everyone but the taker
           // and the defending keeper is pushed to the edge of the box, and the
