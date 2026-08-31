@@ -16,11 +16,33 @@ tournaments, betting, chat, graphics) carried over. Key facts:
   (HALF_SECONDS / OT_SECONDS), the phase and restart-kind enums, and the
   progression curve.
 - **The football, specifically:**
-  - One human controls ONE outfielder. Every side gets a bot keeper
-    (`role = ROLE_KEEPER`), spawned in `goLive` and deleted in
-    `endMatchCleanup` — keepers are per-match, not per-room.
+  - It is 5-a-side: every side fields `OUTFIELD_PER_SIDE` (4) outfielders in a
+    1-2-1 diamond plus a keeper. Human seats take teamSlot 0..teamSize-1 and
+    bot FILLERS take the rest. `lobby.teamSize` is HUMAN seats (1-3), not
+    players on the pitch — a 1v1 room is still ten bodies.
+  - Keepers and fillers are `matchBot: true`: spawned in `goLive`, deleted in
+    `endMatchCleanup`. That predicate must key on `matchBot`, NOT `isBot` —
+    `create_practice` seats a LOBBY bot as p1Id and `rematch` reuses it.
+  - **Control is a token on the BODY, not on the person.** `player.ctrlSeat`
+    holds the teamSlot of the human driving that body (255 = AI), so "two
+    humans driving one footballer" is unrepresentable rather than merely
+    forbidden. `getPlayer` returns the PERSON; `controlledBody` returns the
+    body their stick moves. The four input reducers go through the latter,
+    and the tick's AI gate asks `ctrlSeat === CTRL_NONE`, never `isBot`.
+    `bindPilot` is the only writer of the token.
+  - `isBot` now means only "this row is not a person". Anything counting
+    HUMAN SEATS (isRanked, sideMmr, teamName) must say so explicitly, or a
+    pitch full of fillers silently makes every match unranked.
+  - Bots steer on `mvX/mvY` FLOATS; `dirX/dirY` stay as the rendered facing.
+    Signing a heading into the i8 stick is what made them zig-zag.
+  - Exactly one player per side may approach the ball: the elected presser
+    (`match.presser0/1`, with hysteresis). Everyone else is pushed out of
+    `AI_PRESS_BUBBLE`. That rule is what prevents the under-8s huddle.
   - Possession is a real model: the ball sticks to `ball.ownerId` inside a
-    control radius and is knocked ahead of their run. A struck ball sets
+    control radius and is knocked ahead of their run. Ball deceleration is
+    quadratic AIR DRAG (`BALL_DRAG`) plus constant rolling resistance —
+    rolling resistance alone is right for a slow ball and sends a struck one
+    750 units down a 132-unit pitch. A struck ball sets
     `ball.lockTicks`, which locks out `ball.lastTouchId` — WITHOUT that the
     kicker's own control radius swallows the shot on the next tick and
     nothing ever leaves a boot. Any other player's touch clears the lock.
@@ -31,8 +53,12 @@ tournaments, betting, chat, graphics) carried over. Key facts:
     (`executeKick`'s `shootAssist`). Without it, eight-way aim cannot hit a
     fourteen-foot goal from an angle and the game is unplayable.
   - The keeper commits to a save only inside its level's `react` window and
-    with an `err` offset. A keeper that reads the whole flight is unbeatable
-    from range; `KEEPER_CLEAR_RADIUS` is what it can actually glove.
+    with an `err` offset. A ball in free flight crosses the line at
+    `x + vx*t` no matter when you compute it, so the keeper's prediction is
+    EXACT and `err` is the only thing making it beatable — it must exceed the
+    gap between `KEEPER_CLEAR_RADIUS` and the corner of the goal.
+  - A kickoff nobody takes freezes the match forever, so after
+    `KICKOFF_AUTO` a team-mate steps in and takes it.
 - Betting lives in the same two files: the `wallet`/`bet`/`book` tables +
   `place_bet` in the module, the BETS panel and pitchside bar in
   `client/src/main.ts`. Odds are server-authoritative — the client only

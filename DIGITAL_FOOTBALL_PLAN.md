@@ -1,13 +1,13 @@
 # Digital Football — plan
 
-A spiritual sibling of Digital Football: a Virtua-Striker-flavored arcade
+A spiritual sibling of Digital Tennis: a Virtua-Striker-flavored arcade
 soccer game for the browser, living in its own repo
 (`monkzoren/digital-football`), built on the same bones — SpacetimeDB is the
 entire backend, a scheduled tick reducer runs the authoritative simulation,
 and a Vite + TypeScript Three.js client renders it with a TV camera. This
 document is the plan; nothing here ships into digital-football.
 
-> **Status: M0–M3 landed.** The module and client below are built: pitch,
+> **Status: M0–M4 landed.** The module and client below are built: pitch,
 > ball physics, dribbling, charged kicks, chips, slide tackles, sprint and
 > stamina, keeper and outfield bots, goals, the match clock with halves and
 > golden goal, every restart, plus the whole inherited meta layer (rooms,
@@ -18,9 +18,9 @@ document is the plan; nothing here ships into digital-football.
 ## Vision
 
 Small-sided, fast, physical arcade football. Each human controls **one
-footballer** (like haxball or the on-the-sticks player in FIFA, not a whole
-team), teams of 1–3 humans with server-side bots filling the rest of a
-5-a-side lineup plus an automated goalkeeper. Matches are short and loud:
+footballer at a time and switches between them**, like FIFA — teams of 1–3
+humans with server-side bots filling the rest of a 5-a-side lineup plus an
+automated goalkeeper. Matches are short and loud:
 two 3-minute halves (or first-to-N goals in casual rooms), golden-goal
 overtime, crowd, replays-free instant restarts. Everything social that made
 Digital Football fun carries over wholesale: lobby codes and public lobby
@@ -91,9 +91,11 @@ tick"; almost all of the meta layer is sport-agnostic. Honest split:
   during live play), draw → **golden goal** overtime with a 2-minute cap →
   penalty-shootout minigame (stretch; ship sudden-death goal first, add
   shootout later). Casual/custom rooms can pick "first to N goals" instead.
-- Human switching between teammates: **out of scope for v1.** One human =
-  one footballer, always. This keeps input, camera, and MMR semantics
-  identical to tennis and sidesteps the hardest part of football games.
+- Human switching between teammates: **shipped.** The original plan deferred
+  this, on the grounds that it kept input, camera and MMR semantics identical
+  to tennis. That was exactly the problem — it also kept the GAME identical to
+  tennis, with one body per side on an empty pitch. Control is a token on the
+  body (`player.ctrlSeat`); see CLAUDE.md.
 
 ### Controls (mirror the tennis muscle memory)
 

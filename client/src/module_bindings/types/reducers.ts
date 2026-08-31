@@ -25,6 +25,7 @@ import SetNameReducer from "../set_name_reducer";
 import SetTournamentSettingsReducer from "../set_tournament_settings_reducer";
 import SpectateMatchReducer from "../spectate_match_reducer";
 import StartTournamentReducer from "../start_tournament_reducer";
+import SwitchPlayerReducer from "../switch_player_reducer";
 import TackleReducer from "../tackle_reducer";
 
 export type ClaimWinParams = __Infer<typeof ClaimWinReducer>;
@@ -46,5 +47,6 @@ export type SetNameParams = __Infer<typeof SetNameReducer>;
 export type SetTournamentSettingsParams = __Infer<typeof SetTournamentSettingsReducer>;
 export type SpectateMatchParams = __Infer<typeof SpectateMatchReducer>;
 export type StartTournamentParams = __Infer<typeof StartTournamentReducer>;
+export type SwitchPlayerParams = __Infer<typeof SwitchPlayerReducer>;
 export type TackleParams = __Infer<typeof TackleReducer>;
 

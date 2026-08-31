@@ -6,14 +6,14 @@ import { Identity } from 'spacetimedb';
 // the goal at y=-PITCH_HALF_LEN and attacks +y, side 1 the mirror image.
 // Duplicated in client/src/config.ts — keep the two in sync.
 // ---------------------------------------------------------------------------
-const PITCH_HALF_LEN = 40;
-const PITCH_HALF_WID = 24;
-const GOAL_HALF_W = 7; // goal mouth: x in [-7, 7]
-const GOAL_HEIGHT = 4.6; // crossbar
-const BOX_DEPTH = 11; // penalty area depth from the goal line
-const BOX_HALF_W = 13;
-const CENTER_CIRCLE_R = 8;
-const BALL_RADIUS = 0.55;
+const PITCH_HALF_LEN = 66;
+const PITCH_HALF_WID = 34;
+const GOAL_HALF_W = 6.5; // a 4 m 5-a-side goal — 19% of the pitch width
+const GOAL_HEIGHT = 6.6; // crossbar — 2 m, and above a 5.54-unit player's head
+const BOX_DEPTH = 20; // futsal's 6 m area; also the keeper's sweeping range
+const BOX_HALF_W = 20;
+const CENTER_CIRCLE_R = 10; // 3 m, 15% of the width
+const BALL_RADIUS = 0.45; // 27 cm — a 22 cm ball, arcade-exaggerated
 
 // Players may roam a touch past the lines (the ball going out is a restart,
 // a body never is).
@@ -27,7 +27,7 @@ const TICK_HZ = 30;
 const TICK_MICROS = BigInt(Math.round(1_000_000 / TICK_HZ));
 const DT = 1 / TICK_HZ;
 const ticks = (seconds: number) => Math.max(1, Math.round(seconds * TICK_HZ));
-const GRAVITY = -60;
+const GRAVITY = -38; // 1.18 g — the read on a cross IS its hang time
 
 // ---------------------------------------------------------------------------
 // Match format
@@ -37,11 +37,18 @@ const OT_SECONDS = 120; // golden-goal overtime; at 0 it runs on as sudden death
 const HALF_TICKS = HALF_SECONDS * TICK_HZ;
 const OT_TICKS = OT_SECONDS * TICK_HZ;
 
-const GOAL_PAUSE = ticks(4.5); // celebration before the kickoff resets
+// Celebration before the kickoff resets. MUST outlast the client's replay
+// budget (CUT_DELAY + WINDOW/SPEED + TAIL ~= 5.9 s) or the replay cuts away
+// before the ball crosses the line — a goal replay that never shows the goal.
+const GOAL_PAUSE = ticks(7.5);
 const RESTART_PAUSE = ticks(1.4); // kick-in / corner / goal kick placement
-const HALFTIME_PAUSE = ticks(5);
+const HALFTIME_PAUSE = ticks(6);
 const COUNTDOWN_TICKS = ticks(3); // 3-2-1 before the first kickoff
 const RESTART_GRACE = ticks(1.6); // only the awarded side may play the ball
+// If the human who should restart just stands there, a team-mate steps up
+// and takes it. Without this, a player who concedes and then does nothing
+// freezes the match for everyone, permanently.
+const KICKOFF_AUTO = ticks(4);
 
 // Restart kinds — what the pending pause resolves into.
 const RK_NONE = 0;
@@ -56,33 +63,36 @@ const RK_DROP = 7; // neutral drop after a reconnect halt
 // ---------------------------------------------------------------------------
 // Movement, dribbling, kicking
 // ---------------------------------------------------------------------------
-const PLAYER_SPEED = 24;
-const SPRINT_MUL = 1.34;
-const DRIBBLE_MUL = 0.88; // running with the ball is a touch slower
+const PLAYER_SPEED = 17; // 5.2 m/s — a jog, so sprinting can mean something
+const SPRINT_MUL = 1.72; // -> 8.9 m/s, a real sprint
+const DRIBBLE_MUL = 0.85; // 4.4 m/s — running with the ball at pace
 const STAMINA_MAX = 1000;
 const SPRINT_DRAIN = 7; // per tick while sprinting and moving
 const STAMINA_REGEN = 3; // per tick otherwise
 
-const CONTROL_RADIUS = 2.6; // ball inside this sticks to your feet
-const CONTROL_KEEP_RADIUS = 3.4; // an owner keeps the ball out to here
-const CONTROL_MAX_SPEED = 34; // faster balls can only be trapped, not owned
-const CONTROL_MAX_Z = 1.7;
+const CONTROL_RADIUS = 2.8; // ball inside this sticks to your feet (~0.85 m)
+const CONTROL_KEEP_RADIUS = 3.6; // an owner keeps the ball out to here
+// Faster balls can only be trapped, not owned. This sat BELOW the bottom of
+// the real passing range, so every pass firm enough to beat a defender was
+// untakeable by construction.
+const CONTROL_MAX_SPEED = 46;
+const CONTROL_MAX_Z = 2.5; // thigh height, so a dropping ball can be taken
 const TRAP_DAMP = 0.3; // a trap kills most of the ball's pace
-const TOUCH_AHEAD = 2.0; // dribble touch distance in front of the runner
+const TOUCH_AHEAD = 3.2; // ~1 m knock in front of the runner
 const CONTEST_CHANCE = 0.05; // per tick, standing challenge inside the radius
 
 // How long a struck ball is out of its kicker's reach (see Ball.lockTicks).
 const KICK_LOCK = ticks(0.3);
-const KICK_RANGE = 3.0; // release must happen with the ball this close
-const KICK_MAX_Z = 2.2; // ...and on (or near) the ground; chips launch it
+const KICK_RANGE = 3.4; // release must happen with the ball this close
+const KICK_MAX_Z = 4.5; // chest height — below this, volleys were impossible
 const KICK_CHARGE_TICKS = ticks(0.8); // full power after this long a hold
 // Inside this range of the opponent goal a forward kick becomes a shot on
 // target (see executeKick).
 const SHOOT_RANGE = 34;
-const KICK_MIN_SPEED = 20;
-const KICK_MAX_SPEED = 64;
-const CHIP_MIN_SPEED = 14;
-const CHIP_MAX_SPEED = 40;
+const KICK_MIN_SPEED = 34; // a soft pass (37 km/h)
+const KICK_MAX_SPEED = 100; // a proper strike (110 km/h)
+const CHIP_MIN_SPEED = 24;
+const CHIP_MAX_SPEED = 62;
 
 // Kick kinds (button pressed)
 const KICK_NORMAL = 0; // tap = pass, hold = ripper; shoot by aiming at goal
@@ -91,10 +101,12 @@ const KICK_CHIP = 1; // lofted: crosses, chips over the keeper
 // Slide tackle: a committed lunge, then a recovery stun.
 const SLIDE_TOTAL = ticks(1.0); // full commitment, lunge + stun
 const SLIDE_ACTIVE_AFTER = ticks(0.6); // slideTicks above this = still lunging
-const SLIDE_SPEED = 38;
-const SLIDE_REACH = 2.3; // ball within this during the lunge is won
+const SLIDE_SPEED = 26; // 7.9 m/s — a lunge, not a teleport
+// Must EXCEED CONTROL_KEEP_RADIUS, or a sliding player has to get closer to
+// the ball than a standing one — which is backwards.
+const SLIDE_REACH = 4.0;
 const SLIDE_COST = 220; // stamina
-const SLIDE_KNOCK = 30; // pace the won ball is knocked ahead with
+const SLIDE_KNOCK = 40; // pace the won ball is knocked ahead with
 
 // Characters: per-athlete stats, all multipliers around 1.0. Every edge is
 // paid for elsewhere — the pip totals on the client's select screen all match
@@ -130,10 +142,18 @@ const CHAR_COUNT = CHAR_STATS.length;
 const charStat = (id: number) => CHAR_STATS[id] ?? CHAR_STATS[4];
 
 // Pitch styles: rolling friction (per-second velocity keep) and bounce.
+// Air drag, shared by every surface: dv/dt = -BALL_DRAG * v^2, which decays
+// speed by e^-(BALL_DRAG * distance). At 0.03 a ball keeps about a third of
+// its pace over 40 units — a shot still arrives hard, a pass settles.
+const BALL_DRAG = 0.03;
+
+// `friction` is CONSTANT DECELERATION in units/s^2 (Coulomb rolling
+// resistance), not an exponential decay rate — see the rolling branch in
+// game_tick. Real grass takes ~0.6-1.0 m/s^2 off a rolling ball.
 const PITCHES = [
-  { friction: 1.1, rest: 0.55 }, // 0 grass day — the standard carpet
-  { friction: 1.0, rest: 0.58 }, // 1 grass night — a touch slicker
-  { friction: 1.5, rest: 0.66 }, // 2 street — grippy concrete, lively bounce
+  { friction: 2.4, rest: 0.7 }, // 0 grass day — the standard carpet
+  { friction: 2.1, rest: 0.72 }, // 1 grass night — a touch slicker
+  { friction: 1.5, rest: 0.82 }, // 2 street — concrete runs faster and bounces higher
 ];
 
 // ---------------------------------------------------------------------------
@@ -147,17 +167,37 @@ const KEEPER_CHAR = 4;
 const ROLE_OUTFIELD = 0;
 const ROLE_KEEPER = 1;
 
+// Control token (player.ctrlSeat): the teamSlot of the human driving this
+// body, or CTRL_NONE when the AI has it.
+const CTRL_NONE = 255;
+
+// Switching. A manual press locks briefly so a mashed button lands on one
+// body; an automatic handover locks longer so the game does not fight the
+// player for the stick.
+const SWITCH_LOCK = ticks(0.22);
+const AUTO_LOCK = ticks(0.6);
+// Auto-switch only hands you a defender who is genuinely better placed...
+const AUTO_SWITCH_MARGIN = 6;
+// ...and only when the ball is close enough for it to be your problem.
+const AUTO_SWITCH_RANGE = 28;
+// How hard a held stick biases manual selection toward that direction.
+const SWITCH_STICK_W = 14;
+// The ball's near-future position is what you actually want to switch toward.
+const SWITCH_LEAD = 0.35;
+
 // Keeper tuning: the keeper is always a bot, one per side, spawned with the
 // match and deleted with it.
-const KEEPER_SPEED = 21;
-const KEEPER_LINE = 1.8; // how far off the goal line it holds
-const KEEPER_MAX_X = GOAL_HALF_W + 2.5;
+const KEEPER_SPEED = 15; // a keeper is not faster than an outfielder
+const KEEPER_LINE = 3.0; // how far off the goal line it holds (~1 m)
+const KEEPER_MAX_X = GOAL_HALF_W + 1.5; // never camp outside your own post
 const KEEPER_RANGE_Y = BOX_DEPTH; // never strays past the box
-// What the keeper can actually get a glove to. Wide enough to make shooting
-// straight at them pointless, tight enough that the corners are open — the
-// keeper has to be beaten by placement, not out-waited.
-const KEEPER_CLEAR_RADIUS = 1.9;
-const KEEPER_CLEAR_SPEED = 32;
+// What the keeper can actually get a glove to. Arm reach plus a step is ~4.2,
+// but the keeper's predicted crossing point is EXACT (a ball in free flight
+// crosses at x + vx*t regardless of when you compute it), so at that radius
+// it covers two thirds of the mouth and can never be wrong-footed — an
+// unbeatable wall. Until it dives properly, its reach is what has to give.
+const KEEPER_CLEAR_RADIUS = 3.4;
+const KEEPER_CLEAR_SPEED = 62; // anything less is a back-pass to the striker
 
 // Outfield bot difficulty (0 easy · 1 normal · 2 hard):
 //   speed        movement multiplier
@@ -174,10 +214,13 @@ const BOT_LEVELS = [
 // gets to see before it commits to the save — a keeper that reads the whole
 // flight is unbeatable from range, which is not a football game — and `err`
 // is how far off the mark it commits.
+// `err` is how far off the true crossing point the keeper commits. It is the
+// ONLY thing making a keeper beatable, so it has to exceed the gap between
+// its reach and the corner of the goal.
 const KEEPER_LEVELS = [
-  { speed: 0.62, reach: 0.75, react: 0.2, err: 3.2 },
-  { speed: 0.85, reach: 1.0, react: 0.34, err: 1.7 },
-  { speed: 1.05, reach: 1.15, react: 0.5, err: 0.7 },
+  { speed: 0.62, reach: 0.75, react: 0.14, err: 4.0 },
+  { speed: 0.85, reach: 1.0, react: 0.22, err: 2.6 },
+  { speed: 1.05, reach: 1.15, react: 0.3, err: 1.4 },
 ];
 
 // ---------------------------------------------------------------------------
@@ -342,6 +385,12 @@ const Match = table(
     haltedAt: t.u64().default(0n),
     haltUntil: t.u64().default(0n),
     haltName: t.string().default(''),
+    // NOTE: appended — the teamSlot of each side's elected presser (255 =
+    // none). Stored so the election has HYSTERESIS: recomputed from scratch
+    // every tick it would flap between two equidistant players. A u8, not an
+    // Identity, to keep toHexString out of the 30 Hz path.
+    presser0: t.u8().default(255),
+    presser1: t.u8().default(255),
   }
 );
 
@@ -379,6 +428,27 @@ const Player = table(
     isBot: t.bool(),
     spectator: t.bool().default(false),
     teamSlot: t.u8().default(0),
+    // NOTE: appended columns — CONTROL. A body is driven by whichever human
+    // seat's stick holds its token: ctrlSeat is that seat's teamSlot, or
+    // CTRL_NONE for AI. The token lives on the BODY, never on the person,
+    // which is what makes "two humans driving one footballer" unrepresentable
+    // rather than merely forbidden.
+    ctrlSeat: t.u8().default(255),
+    switchLock: t.u8().default(0), // ticks before this seat may switch again
+    // Spawned for THIS match and deleted with it (keepers and lineup
+    // fillers), as opposed to a lobby bot that outlives the match.
+    matchBot: t.bool().default(false),
+    // NOTE: appended AFTER matchBot on purpose — columns are append-only or
+    // the publish is rejected as a table reorder. Cycle cursor for repeated
+    // switch presses: a stateless "next nearest" would skip and repeat men,
+    // because the ranking is by distance to a ball that moves 30 times a sec.
+    switchIdx: t.u8().default(0),
+    // ANALOG steering. dirX/dirY are i8 and also drive the rendered facing;
+    // a bot asked to run 20 ahead and 3 across would sign() that to a 45
+    // degree diagonal, overshoot, flip, and zig-zag its way across the pitch.
+    // Movement integrates these instead; humans just copy their stick in.
+    mvX: t.f32().default(0),
+    mvY: t.f32().default(0),
   }
 );
 
@@ -671,8 +741,18 @@ const hash01 = (n: number) => {
 // derived from their match id so concurrent matches never collide.
 const botIdentity = (lobbyId: bigint, index: bigint | number) =>
   new Identity(0xb07_00000000_00000000_00000000n + (BigInt(index) << 64n) + lobbyId);
+// Synthetic-identity BANDS. botIdentity() shifts the index left 64 bits, and
+// both insertKeeper and insertBot are find-then-update UPSERTS, so two bands
+// that overlap silently corrupt a row instead of erroring. All three live
+// here so a new one can be checked against the others at a glance:
+//   lobby bots  small counters from start_tournament / create_practice (0..16)
+//   keepers     [1e6, 1e6 + 2*2^32]        ~ up to 8.6e9
+//   fillers     [2^46, 2^46 + 8*2^32]      ~ 7.0e13 .. 7.0e13 + 3.4e10
 const keeperIndex = (matchId: bigint, side: number) =>
   1_000_000n + (matchId & 0xffffffffn) * 2n + BigInt(side);
+const FILLER_BAND = 0x4000_0000_0000n;
+const fillerIndex = (matchId: bigint, side: number, slot: number) =>
+  FILLER_BAND + (matchId & 0xffffffffn) * 8n + BigInt(side) * 4n + BigInt(slot);
 
 function lobbyPlayers(ctx: Ctx, lobbyId: bigint): PlayerRow[] {
   return [...ctx.db.player.byLobby.filter(lobbyId)];
@@ -714,9 +794,13 @@ function unitName(ctx: Ctx, lobbyId: bigint, captainId: Identity): string {
 }
 
 // Scoreboard name for a side: outfielders only — the keeper is furniture.
+// Scoreboard / banner name for a side: the PEOPLE on it, never the lineup.
+// Without the isBot filter every full-time line reads "ALICE & ACE BOT 2 &
+// ACE BOT 3" once fillers are on the pitch — and winVerb's ' & ' test would
+// pluralize a solo player's win. (isBot = this row is not a person.)
 function teamName(players: PlayerRow[], side: number): string {
   const names = players
-    .filter(p => p.side === side && p.role === ROLE_OUTFIELD)
+    .filter(p => p.side === side && p.role === ROLE_OUTFIELD && !p.isBot)
     .sort((a, b) => a.teamSlot - b.teamSlot)
     .map(p => p.name || 'PLAYER');
   return names.join(' & ') || `Side ${side + 1}`;
@@ -737,10 +821,30 @@ function generateCode(ctx: Ctx): string {
   throw new SenderError('Could not allocate a lobby code, try again');
 }
 
+// The PERSON behind the caller: their account/session row. Everything about
+// membership, names and progression wants this.
 function getPlayer(ctx: Ctx): PlayerRow {
   const player = ctx.db.player.identity.find(ctx.sender);
   if (!player) throw new SenderError('No player record; reconnect and try again');
   return player;
+}
+
+// The BODY this person is currently driving — the row their stick moves.
+// Usually their own, but after a switch it is a team-mate's.
+//
+// The fallback STAMPS rather than merely returning: if no body carries my
+// seat, claim my own row first. Returning an unstamped row would hand the
+// same body to both botPlay and the human stick, every tick, forever.
+function controlledBody(ctx: Ctx, me: PlayerRow): PlayerRow {
+  if (me.matchId === 0n) return me;
+  for (const b of ctx.db.player.byMatch.filter(me.matchId)) {
+    if (b.side === me.side && b.role === ROLE_OUTFIELD && b.ctrlSeat === me.teamSlot) {
+      return b;
+    }
+  }
+  const mine = ctx.db.player.identity.find(me.identity);
+  if (!mine || mine.role !== ROLE_OUTFIELD) return me;
+  return ctx.db.player.identity.update({ ...mine, ctrlSeat: mine.teamSlot });
 }
 
 function startTicking(ctx: Ctx, matchId: bigint) {
@@ -780,11 +884,111 @@ function lobbyPhysics(lobby: LobbyRow | null | undefined): Phys {
 // ---------------------------------------------------------------------------
 // Match lifecycle
 // ---------------------------------------------------------------------------
-// Formation lanes by team slot for 1–3 outfielders per side.
-function laneX(teamSlot: number, teamSize: number): number {
-  if (teamSize <= 1) return 0;
-  if (teamSize === 2) return teamSlot === 0 ? -9 : 9;
-  return teamSlot === 0 ? 0 : teamSlot === 1 ? -13 : 13;
+// ---------------------------------------------------------------------------
+// Formation: a 1-2-1 diamond per side. Slot 0 is the striker, so a lone human
+// (teamSize 1) gets the position that is actually fun to play; extra human
+// seats fill outward from there and the rest are bot fillers.
+//
+// Anchors are FRACTIONS of the pitch, never absolute units, so re-sizing the
+// pitch can never silently break the shape.
+// ---------------------------------------------------------------------------
+const POS_ST = 0;
+const POS_LM = 1;
+const POS_RM = 2;
+const POS_CB = 3;
+const OUTFIELD_PER_SIDE = 4;
+
+const FORMATION = [
+  { name: 'ST', ax: 0.0, ay: 0.42 },
+  { name: 'LM', ax: -0.55, ay: 0.02 },
+  { name: 'RM', ax: 0.55, ay: 0.02 },
+  { name: 'CB', ax: 0.0, ay: -0.44 },
+];
+const posOf = (teamSlot: number) => clamp(teamSlot, 0, OUTFIELD_PER_SIDE - 1);
+
+// Nobody but the elected presser may come inside this radius of the ball.
+// This one rule is what structurally prevents the under-8s huddle: however
+// the duty logic behaves, at most one player per side converges on the ball.
+const AI_PRESS_BUBBLE = PITCH_HALF_WID * 0.21;
+// How far off your formation anchor you may drift while off the ball.
+const AI_ZONE_LEASH = PITCH_HALF_LEN * 0.35;
+// Team-mates repel each other at this range, so two men never occupy one spot.
+const AI_SEPARATION_R = PITCH_HALF_WID * 0.29;
+// Seconds of advantage the incumbent presser keeps, so the job stops flapping.
+const PRESS_HYST = 0.12;
+// The longest pass a bot will attempt.
+const AI_PASS_MAX = PITCH_HALF_LEN * 0.7;
+
+// How hard the whole block tracks the ball. Never 1:1 — a team that mirrors
+// the ball exactly reads as a shoal of fish, not a shape.
+const LINE_FOLLOW = 0.55;
+const LINE_PUSH = 6; // squeeze up when we have it
+const LINE_DROP = 4; // sit deeper when they do
+const BALL_SIDE_SHIFT = 0.45; // the block slides toward the ball's flank...
+const BALL_SIDE_MAX = 0.35; // ...but never past this fraction of the half-width
+const CB_GOALSIDE = 4; // the centre-back always stays this far goal-side of the ball
+const ST_MAX_TRACKBACK = 0.25; // the striker never chases past this into our half
+
+// Attack-space: u grows toward the goal this side is attacking, so the same
+// arithmetic works for both sides without sign juggling at every step.
+const toU = (side: number, y: number) => y * attackSign(side);
+const fromU = (side: number, u: number) => u * attackSign(side);
+
+interface Shape {
+  side: number;
+  lineU: number; // where the block's centre sits, in attack-space
+  shiftX: number;
+}
+
+function teamShape(side: number, ballX: number, ballY: number, weHavePoss: boolean): Shape {
+  const ballU = toU(side, ballY);
+  const lineU = clamp(
+    ballU * LINE_FOLLOW + (weHavePoss ? LINE_PUSH : -LINE_DROP),
+    -PITCH_HALF_LEN * 0.55,
+    PITCH_HALF_LEN * 0.55
+  );
+  const shiftX = clamp(
+    ballX * BALL_SIDE_SHIFT,
+    -PITCH_HALF_WID * BALL_SIDE_MAX,
+    PITCH_HALF_WID * BALL_SIDE_MAX
+  );
+  return { side, lineU, shiftX };
+}
+
+// Where a given position wants to stand, given the block and the ball.
+function anchorFor(shape: Shape, pos: number, ballX: number, ballY: number): { x: number; y: number } {
+  const f = FORMATION[pos] ?? FORMATION[POS_ST];
+  const ballU = toU(shape.side, ballY);
+  let u = shape.lineU + f.ay * PITCH_HALF_LEN;
+  // The two rules that keep the shape honest: a centre-back that lets the ball
+  // get behind it is not a centre-back, and a striker who tracks all the way
+  // back is why the pitch ends up with everyone in one half.
+  if (pos === POS_CB) u = Math.min(u, ballU - CB_GOALSIDE);
+  if (pos === POS_ST) u = Math.max(u, -PITCH_HALF_LEN * ST_MAX_TRACKBACK);
+  u = clamp(u, -(PITCH_HALF_LEN - 4), PITCH_HALF_LEN - 6);
+  const x = clamp(shape.shiftX + f.ax * PITCH_HALF_WID, -(PITCH_HALF_WID - 3), PITCH_HALF_WID - 3);
+  return { x, y: fromU(shape.side, u) };
+}
+
+// Kickoff shape: the same formation, squeezed into your own half. The team you
+// see lined up is the team you are about to play with.
+function kickoffSpot(
+  side: number,
+  pos: number,
+  kickoffSide: number
+): { x: number; y: number } {
+  if (side === kickoffSide && pos === POS_ST) return { x: 0, y: fromU(side, -2.5) };
+  const f = FORMATION[pos] ?? FORMATION[POS_ST];
+  // everyone behind the halfway line, spread on their formation width
+  let u = -PITCH_HALF_LEN * 0.5 + (f.ay + 0.44) * PITCH_HALF_LEN * 0.6;
+  u = Math.min(u, -3);
+  let x = f.ax * PITCH_HALF_WID;
+  let y = fromU(side, u);
+  // the side not kicking off has to stand out of the centre circle
+  if (side !== kickoffSide && Math.hypot(x, y) < CENTER_CIRCLE_R + 1.5) {
+    y = fromU(side, -(CENTER_CIRCLE_R + 2));
+  }
+  return { x, y };
 }
 
 // Reset everyone for a kickoff: outfielders in their own half, the kicking
@@ -799,21 +1003,18 @@ function setupKickoff(ctx: Ctx, match: MatchRow, msg: string): MatchRow {
     if (p.role === ROLE_KEEPER) {
       x = 0;
       y = sideSign(p.side) * (PITCH_HALF_LEN - KEEPER_LINE);
-    } else if (p.side === match.kickoffSide && p.teamSlot === 0) {
-      // the kickoff taker stands over the ball
-      x = 0;
-      y = sideSign(p.side) * 2.5;
     } else {
-      x = laneX(p.teamSlot, teamSize);
-      y = sideSign(p.side) * (p.side === match.kickoffSide ? 14 : 12);
-      // non-kickoff side must respect the center circle
-      if (p.side !== match.kickoffSide && Math.hypot(x, y) < CENTER_CIRCLE_R + 1) {
-        y = sideSign(p.side) * (CENTER_CIRCLE_R + 2);
-      }
+      const spot = kickoffSpot(p.side, posOf(p.teamSlot), match.kickoffSide);
+      x = spot.x;
+      y = spot.y;
     }
     ctx.db.player.identity.update({
-      ...p, x, y, dirX: 0, dirY: 0,
+      ...p, x, y, dirX: 0, dirY: 0, mvX: 0, mvY: 0,
       kickTicks: 0, kickHeld: false, slideTicks: 0,
+      // Every kickoff hands each human back their own footballer. Reconnect
+      // resumes through here, so a returning player needs no special case.
+      ctrlSeat: !p.isBot && p.role === ROLE_OUTFIELD ? p.teamSlot : CTRL_NONE,
+      switchLock: 0,
     });
   }
   const ball = ctx.db.ball.matchId.find(match.id);
@@ -876,6 +1077,8 @@ function createMatch(
     haltedAt: 0n,
     haltUntil: 0n,
     haltName: '',
+    presser0: 255,
+    presser1: 255,
   });
   openBook(ctx, lobby, row);
   return row;
@@ -911,6 +1114,55 @@ function insertKeeper(ctx: Ctx, lobbyId: bigint, match: MatchRow, side: number) 
     isBot: true,
     spectator: false,
     teamSlot: 0,
+    ctrlSeat: CTRL_NONE,
+    switchLock: 0,
+    switchIdx: 0,
+    matchBot: true,
+    mvX: 0,
+    mvY: 0, // spawned with this match, deleted with it
+  };
+  if (ctx.db.player.identity.find(identity)) ctx.db.player.identity.update(row);
+  else ctx.db.player.insert(row);
+}
+
+// Seat a bot outfielder to complete a 5-a-side lineup. Like keepers, fillers
+// belong to ONE match: spawned in goLive, deleted in endMatchCleanup. They
+// are never lobby members in their own right — matchBot is what tells the
+// cleanup which bots to collect.
+function insertFiller(ctx: Ctx, lobbyId: bigint, match: MatchRow, side: number, slot: number) {
+  const identity = botIdentity(lobbyId, fillerIndex(match.id, side, slot));
+  const spot = kickoffSpot(side, posOf(slot), match.kickoffSide);
+  const row = {
+    identity,
+    name: `${FORMATION[posOf(slot)].name} BOT`,
+    lobbyId,
+    matchId: match.id,
+    side,
+    eliminated: false,
+    x: spot.x,
+    y: spot.y,
+    dirX: 0 as number,
+    dirY: 0 as number,
+    sprinting: false,
+    kickTicks: 0,
+    kickKind: 0,
+    kickHeld: false,
+    slideTicks: 0,
+    slideDirX: 0,
+    slideDirY: 0,
+    stamina: STAMINA_MAX,
+    role: ROLE_OUTFIELD,
+    characterId: BOT_CHAR,
+    online: true,
+    isBot: true,
+    spectator: false,
+    teamSlot: slot,
+    ctrlSeat: CTRL_NONE,
+    switchLock: 0,
+    switchIdx: 0,
+    matchBot: true,
+    mvX: 0,
+    mvY: 0,
   };
   if (ctx.db.player.identity.find(identity)) ctx.db.player.identity.update(row);
   else ctx.db.player.insert(row);
@@ -931,6 +1183,11 @@ function goLive(ctx: Ctx, match: MatchRow) {
         slideTicks: 0,
         kickTicks: 0,
         kickHeld: false,
+        // The isBot guard is load-bearing: create_practice seats a lobby bot
+        // as p1Id, and handing it a control token would tell the tick a human
+        // is driving it — freezing the practice opponent for the whole match.
+        ctrlSeat: p.isBot ? CTRL_NONE : teamSlot,
+        switchLock: 0,
       });
     }
   };
@@ -945,8 +1202,16 @@ function goLive(ctx: Ctx, match: MatchRow) {
     assign(match.p0Id, 0, 0);
     assign(match.p1Id, 1, 0);
   }
-  insertKeeper(ctx, match.lobbyId, match, 0);
-  insertKeeper(ctx, match.lobbyId, match, 1);
+  // Complete both lineups: human seats fill teamSlot 0..teamSize-1, bot
+  // fillers take the rest, and every side gets a keeper. A 1v1 room is
+  // therefore one human + 3 fillers + a keeper per side, not two lone men.
+  const humanSeats = lobbyTeamSize(liveLobby);
+  for (const side of [0, 1]) {
+    for (let slot = humanSeats; slot < OUTFIELD_PER_SIDE; slot++) {
+      insertFiller(ctx, match.lobbyId, match, side, slot);
+    }
+    insertKeeper(ctx, match.lobbyId, match, side);
+  }
   if (!ctx.db.ball.matchId.find(match.id)) {
     ctx.db.ball.insert({
       matchId: match.id,
@@ -989,9 +1254,14 @@ function endMatchCleanup(ctx: Ctx, match: MatchRow) {
   const ball = ctx.db.ball.matchId.find(match.id);
   if (ball) ctx.db.ball.matchId.update({ ...ball, active: false, hasOwner: false });
   for (const p of matchPlayers(ctx, match.id)) {
-    // keepers exist only for their match
-    if (p.isBot && p.role === ROLE_KEEPER) ctx.db.player.identity.delete(p.identity);
-    else ctx.db.player.identity.update({ ...p, matchId: 0n, dirX: 0, dirY: 0 });
+    // Keepers and lineup fillers exist only for their match. This must key on
+    // matchBot, NOT on isBot: create_practice seats a LOBBY bot as p1Id and
+    // rematch reuses that row, so collecting every bot here would delete the
+    // practice opponent and break the rematch button.
+    if (p.matchBot) ctx.db.player.identity.delete(p.identity);
+    else ctx.db.player.identity.update({
+      ...p, matchId: 0n, dirX: 0, dirY: 0, ctrlSeat: CTRL_NONE, switchLock: 0,
+    });
   }
 }
 
@@ -1299,10 +1569,16 @@ function isRanked(
 ): boolean {
   if (!lobby || !match.hasP1) return false;
   if (lobby.vsBot) return false;
-  const competitors = seats.filter(p => !p.spectator && p.role === ROLE_OUTFIELD);
-  const humans = competitors.filter(p => !p.isBot);
-  if (humans.length !== competitors.length) return false;
-  return [0, 1].every(s => humans.some(p => p.side === s));
+  // Ranked means every HUMAN SEAT is filled by a human — NOT "every body on
+  // the pitch is human". A 5-a-side lineup is mostly fillers by design, so
+  // the old "no bots on the pitch" test would make every match unranked and
+  // silently freeze MMR. Here isBot means "this row is not a person".
+  const humansOn = (side: number) =>
+    seats.filter(
+      p => p.side === side && !p.spectator && p.role === ROLE_OUTFIELD && !p.isBot
+    ).length;
+  const seatsPerSide = lobbyTeamSize(lobby);
+  return humansOn(0) === seatsPerSide && humansOn(1) === seatsPerSide;
 }
 
 function sideMmr(
@@ -1310,8 +1586,10 @@ function sideMmr(
   side: number,
   before: Map<string, AccountRow | undefined>
 ): number {
+  // Humans only: a filler bot holds no account row, so counting one would
+  // pull a strong side's average back toward MMR_START. (isBot = not a person.)
   const rows = seats.filter(
-    p => p.side === side && !p.spectator && p.role === ROLE_OUTFIELD
+    p => p.side === side && !p.spectator && p.role === ROLE_OUTFIELD && !p.isBot
   );
   if (rows.length === 0) return MMR_START;
   let total = 0;
@@ -2013,6 +2291,14 @@ function insertBot(ctx: Ctx, lobbyId: bigint, index: number, side: number): Iden
     isBot: true,
     spectator: false,
     teamSlot: 0,
+    ctrlSeat: CTRL_NONE,
+    switchLock: 0,
+    switchIdx: 0,
+    // A LOBBY bot: it holds a room/bracket seat and outlives any one match,
+    // so endMatchCleanup must not collect it (rematch reuses this row).
+    matchBot: false,
+    mvX: 0,
+    mvY: 0,
   };
   if (ctx.db.player.identity.find(identity)) ctx.db.player.identity.update(row);
   else ctx.db.player.insert(row);
@@ -2135,6 +2421,12 @@ export const onConnect = spacetimedb.clientConnected(ctx => {
       isBot: false,
       spectator: false,
       teamSlot: 0,
+      ctrlSeat: CTRL_NONE,
+      switchLock: 0,
+      switchIdx: 0,
+      matchBot: false,
+      mvX: 0,
+      mvY: 0,
     });
     return;
   }
@@ -2306,8 +2598,8 @@ export const join_lobby = spacetimedb.reducer({ code: t.string() }, (ctx, { code
       spectator: false,
       side,
       teamSlot,
-      x: laneX(teamSlot, lobbyTeamSize(lobby)),
-      y: sideSign(side) * 20,
+      x: kickoffSpot(side, posOf(teamSlot), side).x,
+      y: kickoffSpot(side, posOf(teamSlot), side).y,
     });
     if (competitors.length + 1 < capacity) return;
     ctx.db.lobby.id.update({ ...lobby, status: L_RUNNING });
@@ -2689,21 +2981,27 @@ export const send_emote = spacetimedb.reducer({ index: t.u8() }, (ctx, { index }
 export const set_input = spacetimedb.reducer(
   { dirX: t.i8(), dirY: t.i8(), sprint: t.bool() },
   (ctx, { dirX, dirY, sprint }) => {
-    const player = getPlayer(ctx);
-    if (player.matchId === 0n) return;
+    const me = getPlayer(ctx);
+    if (me.matchId === 0n) return;
+    const player = controlledBody(ctx, me);
     const dx = clamp(dirX, -1, 1);
     const dy = clamp(dirY, -1, 1);
-    ctx.db.player.identity.update({ ...player, dirX: dx, dirY: dy, sprinting: sprint });
+    // mv mirrors the stick for a human: the movement integrator reads mv, and
+    // a body just taken over from the AI would otherwise keep its heading.
+    ctx.db.player.identity.update({
+      ...player, dirX: dx, dirY: dy, mvX: dx, mvY: dy, sprinting: sprint,
+    });
   }
 );
 
 // Press: start charging a kick. Power comes from how long the button is held
 // (kickTicks counts up in the tick); the kick itself fires on kick_release.
 export const kick = spacetimedb.reducer({ kind: t.u8() }, (ctx, { kind }) => {
-  const player = getPlayer(ctx);
-  if (player.matchId === 0n || player.spectator) return;
+  const me = getPlayer(ctx);
+  if (me.matchId === 0n || me.spectator) return;
+  const player = controlledBody(ctx, me);
   if (player.slideTicks > 0) return; // committed to the slide
-  const match = ctx.db.match.id.find(player.matchId);
+  const match = ctx.db.match.id.find(me.matchId);
   if (!match || match.state !== M_LIVE) return;
   if (match.phase !== PHASE_LIVE && match.phase !== PHASE_KICKOFF) return;
   ctx.db.player.identity.update({
@@ -2718,10 +3016,12 @@ export const kick = spacetimedb.reducer({ kind: t.u8() }, (ctx, { kind }) => {
 // charge time powers it. A kickoff/restart first touch also goes through
 // here.
 export const kick_release = spacetimedb.reducer(ctx => {
-  const player = getPlayer(ctx);
-  if (player.matchId === 0n || !player.kickHeld) return;
+  const me = getPlayer(ctx);
+  if (me.matchId === 0n) return;
+  const player = controlledBody(ctx, me);
+  if (!player.kickHeld) return;
   const released = { ...player, kickHeld: false, kickTicks: 0 };
-  const match = ctx.db.match.id.find(player.matchId);
+  const match = ctx.db.match.id.find(me.matchId);
   if (!match || match.state !== M_LIVE) {
     ctx.db.player.identity.update(released);
     return;
@@ -2782,12 +3082,121 @@ export const kick_release = spacetimedb.reducer(ctx => {
 });
 
 // Slide tackle: a committed lunge along your held direction, then a stun.
+// ---------------------------------------------------------------------------
+// Player switching. The token moves between BODIES; a person never holds one
+// directly, which is what makes "two humans on one footballer" impossible to
+// represent rather than merely forbidden.
+// ---------------------------------------------------------------------------
+// THE ONLY WRITER OF THE TOKEN.
+function bindPilot(ctx: Ctx, me: PlayerRow, from: PlayerRow, to: PlayerRow, lock: number) {
+  if (sameId(from.identity, to.identity)) return;
+  // RE-READ both bodies. The callers hand us rows from a snapshot taken
+  // earlier in the tick, and spreading a stale row would write its old
+  // position back over whatever the movement loop just did — a visible
+  // one-tick rubber-band on every handover.
+  const oldBody = ctx.db.player.identity.find(from.identity);
+  const target = ctx.db.player.identity.find(to.identity);
+  if (!target) return;
+  // Release the old body. Clearing kickHeld matters: only kick_release ever
+  // resets the charge counter, so a body abandoned mid-charge would tick its
+  // kickTicks up forever. slideTicks is deliberately PRESERVED — a man
+  // dropped mid-lunge finishes the lunge under AI, as he should.
+  const stickX = oldBody ? oldBody.dirX : from.dirX;
+  const stickY = oldBody ? oldBody.dirY : from.dirY;
+  const sprint = oldBody ? oldBody.sprinting : from.sprinting;
+  if (oldBody) {
+    ctx.db.player.identity.update({
+      ...oldBody,
+      ctrlSeat: CTRL_NONE,
+      dirX: 0, dirY: 0, mvX: 0, mvY: 0, sprinting: false,
+      kickHeld: false, kickTicks: 0,
+    });
+  }
+  // Claim the new one, CARRYING THE HELD STICK across. The client dedupes
+  // set_input against its last send, so zeroing the stick here would leave
+  // the new man standing still until the player physically changed direction.
+  ctx.db.player.identity.update({
+    ...target,
+    ctrlSeat: me.teamSlot,
+    dirX: stickX, dirY: stickY, sprinting: sprint,
+    kickHeld: false, kickTicks: 0,
+  });
+  // Re-read the person before writing their bookkeeping: when `from` IS this
+  // row, a stale spread would resurrect the token on the body just vacated.
+  const person = ctx.db.player.identity.find(me.identity);
+  if (person) ctx.db.player.identity.update({ ...person, switchLock: lock });
+}
+
+// Bodies on this side the given human may take over right now.
+function switchCandidates(ctx: Ctx, me: PlayerRow, cur: PlayerRow): PlayerRow[] {
+  return matchPlayers(ctx, me.matchId).filter(
+    b =>
+      b.side === me.side &&
+      b.role === ROLE_OUTFIELD &&
+      b.slideTicks === 0 &&
+      b.ctrlSeat === CTRL_NONE &&
+      !sameId(b.identity, cur.identity)
+  );
+}
+
+export const switch_player = spacetimedb.reducer(ctx => {
+  const me = getPlayer(ctx);
+  if (me.matchId === 0n || me.spectator) return;
+  const match = ctx.db.match.id.find(me.matchId);
+  if (!match || match.state !== M_LIVE) return;
+  if (match.phase !== PHASE_LIVE && match.phase !== PHASE_KICKOFF) return;
+  const cur = controlledBody(ctx, me);
+  if (cur.slideTicks > 0) return; // committed to the lunge
+  const ball = ctx.db.ball.matchId.find(match.id);
+  // You cannot walk away from a ball you are carrying. FIFA-correct, and it
+  // deletes a whole class of confusing states.
+  if (ball && ball.hasOwner && sameId(ball.ownerId, cur.identity)) return;
+
+  // Defensive repair: release any OTHER body still claiming my seat, so the
+  // invariant heals itself instead of needing to have never been broken.
+  for (const b of matchPlayers(ctx, me.matchId)) {
+    if (b.ctrlSeat === me.teamSlot && b.side === me.side && !sameId(b.identity, cur.identity)) {
+      ctx.db.player.identity.update({ ...b, ctrlSeat: CTRL_NONE });
+    }
+  }
+
+  const cands = switchCandidates(ctx, me, cur);
+  if (cands.length === 0) return;
+
+  const lead = ball
+    ? { x: ball.x + ball.vx * SWITCH_LEAD, y: ball.y + ball.vy * SWITCH_LEAD }
+    : { x: 0, y: 0 };
+  const stickLen = Math.hypot(cur.dirX, cur.dirY);
+  const ranked = cands
+    .map(b => {
+      let score = Math.hypot(b.x - lead.x, b.y - lead.y);
+      if (stickLen > 0) {
+        // A held stick means "give me the man over THERE".
+        const dx = b.x - cur.x;
+        const dy = b.y - cur.y;
+        const d = Math.hypot(dx, dy) || 1;
+        const cos = (dx * cur.dirX + dy * cur.dirY) / (d * stickLen);
+        if (cos > 0.2) score -= SWITCH_STICK_W * cos;
+      }
+      return { b, score };
+    })
+    .sort((p, q) => p.score - q.score);
+
+  // A re-press inside the lock walks the cursor down the ranking.
+  const idx = me.switchLock > 0 ? (me.switchIdx + 1) % ranked.length : 0;
+  const person = ctx.db.player.identity.find(me.identity);
+  if (person) ctx.db.player.identity.update({ ...person, switchIdx: idx });
+  const fresh = ctx.db.player.identity.find(me.identity) ?? me;
+  bindPilot(ctx, fresh, cur, ranked[idx].b, SWITCH_LOCK);
+});
+
 export const tackle = spacetimedb.reducer(ctx => {
-  const player = getPlayer(ctx);
-  if (player.matchId === 0n || player.spectator) return;
+  const me = getPlayer(ctx);
+  if (me.matchId === 0n || me.spectator) return;
+  const player = controlledBody(ctx, me);
   if (player.slideTicks > 0) return;
   if (player.stamina < SLIDE_COST) return;
-  const match = ctx.db.match.id.find(player.matchId);
+  const match = ctx.db.match.id.find(me.matchId);
   if (!match || match.state !== M_LIVE || match.phase !== PHASE_LIVE) return;
   let dx = player.dirX;
   let dy = player.dirY;
@@ -2812,13 +3221,83 @@ export const tackle = spacetimedb.reducer(ctx => {
 // ---------------------------------------------------------------------------
 // Steer an outfield bot: chase / carry / support by whether its team has the
 // ball. Writes dirX/dirY (like a human stick) and may kick via executeKick.
+// How long this player would take to reach the ball, roughly. Time, not
+// distance: a slow centre-back should decline to chase a ball the striker
+// will get to first.
+function timeToBall(p: PlayerRow, ball: BallRow, speed: number): number {
+  const lead = 0.25;
+  const bx = ball.x + ball.vx * lead;
+  const by = ball.y + ball.vy * lead;
+  return Math.hypot(bx - p.x, by - p.y) / Math.max(1, speed);
+}
+
+// Elect ONE presser per side, with hysteresis against the incumbent.
+function electPresser(
+  ctx: Ctx,
+  match: MatchRow,
+  ball: BallRow,
+  out: PlayerRow[][]
+): MatchRow {
+  let p0 = match.presser0;
+  let p1 = match.presser1;
+  for (const side of [0, 1]) {
+    const squad = out[side];
+    if (squad.length === 0) continue;
+    const incumbent = side === 0 ? p0 : p1;
+    let bestSlot = 255;
+    let bestT = Infinity;
+    for (const p of squad) {
+      if (p.slideTicks > 0) continue;
+      const speed = PLAYER_SPEED * charStat(p.characterId).speed;
+      let t = timeToBall(p, ball, speed);
+      if (p.teamSlot === incumbent) t -= PRESS_HYST; // the job is yours to lose
+      if (t < bestT) {
+        bestT = t;
+        bestSlot = p.teamSlot;
+      }
+    }
+    if (side === 0) p0 = bestSlot;
+    else p1 = bestSlot;
+  }
+  if (p0 !== match.presser0 || p1 !== match.presser1) {
+    return { ...match, presser0: p0, presser1: p1 };
+  }
+  return match;
+}
+
+// Is the straight line from `from` to `mate` clear of opponents? Point-to-
+// segment distance, no square roots in the inner test.
+function laneClear(
+  fx: number, fy: number, tx: number, ty: number, foes: PlayerRow[], w: number
+): boolean {
+  const dx = tx - fx;
+  const dy = ty - fy;
+  const len2 = dx * dx + dy * dy;
+  if (len2 < 0.01) return true;
+  for (const o of foes) {
+    let t = ((o.x - fx) * dx + (o.y - fy) * dy) / len2;
+    if (t <= 0 || t >= 1) continue; // behind the passer or past the target
+    const px = fx + dx * t;
+    const py = fy + dy * t;
+    const ox = o.x - px;
+    const oy = o.y - py;
+    if (ox * ox + oy * oy < w * w) return false;
+  }
+  return true;
+}
+
+// The brain for one bot body. `mates` and `foes` come from a snapshot the
+// tick already holds, so this adds no table reads.
 function botPlay(
   ctx: Ctx,
   match: MatchRow,
   lobby: LobbyRow | null | undefined,
   bot: PlayerRow,
   ball: BallRow,
-  teammates: PlayerRow[],
+  mates: PlayerRow[],
+  foes: PlayerRow[],
+  isPresser: boolean,
+  possSide: number,
   seed: number
 ): void {
   const lvl = BOT_LEVELS[clamp(lobby?.botLevel ?? 1, 0, BOT_LEVELS.length - 1)];
@@ -2827,94 +3306,147 @@ function botPlay(
   const iOwn = ball.hasOwner && sameId(ball.ownerId, bot.identity);
   const noise = (k: number) => (hash01(seed * 7.31 + k) - 0.5) * 2;
 
-  let tx: number;
-  let ty: number;
+  // ---- ON THE BALL: one scored decision, ordered shoot > pass > carry ----
   if (iOwn) {
-    // Carry toward goal, drifting off the sideline.
-    tx = clamp(ball.x * 0.6, -PITCH_HALF_WID + 4, PITCH_HALF_WID - 4);
-    ty = goalY;
-    const distGoal = Math.hypot(ball.x, goalY - ball.y);
-    const roll = hash01(seed * 3.7 + match.clockTicks * 0.13);
-    if (distGoal < 30 && roll < lvl.shootChance) {
-      // shoot: pick a corner
+    const goalDist = Math.hypot(ball.x, goalY - ball.y);
+    const nearestFoe = foes.reduce(
+      (d, o) => Math.min(d, Math.hypot(o.x - bot.x, o.y - bot.y)),
+      99
+    );
+    // SHOOT: close enough, and the mouth is not walled off.
+    if (goalDist < SHOOT_RANGE) {
       const corner = (hash01(seed * 9.1 + match.clockTicks) < 0.5 ? -1 : 1) * (GOAL_HALF_W - 1.6);
+      const clearShot = laneClear(ball.x, ball.y, corner, goalY, foes, 1.6);
+      const urgency = 1 - goalDist / SHOOT_RANGE;
+      if (clearShot && urgency > 0.25) {
+        executeKick(
+          ctx, match, ball, bot, KICK_NORMAL, clamp(0.55 + urgency, 0.5, 1),
+          corner - ball.x, goalY - ball.y, lvl.shootErr
+        );
+        return;
+      }
+    }
+    // PASS: score every mate on progression, how open they are, and whether
+    // the lane is actually on. Beats rolling a die for it.
+    let best: PlayerRow | null = null;
+    let bestScore = 0;
+    for (const mate of mates) {
+      const d = Math.hypot(mate.x - bot.x, mate.y - bot.y);
+      if (d < 8 || d > AI_PASS_MAX) continue;
+      if (!laneClear(ball.x, ball.y, mate.x, mate.y, foes, 2.2)) continue;
+      const openness = foes.reduce(
+        (m, o) => Math.min(m, Math.hypot(o.x - mate.x, o.y - mate.y)),
+        99
+      );
+      const progress = (mate.y - bot.y) * atk; // + = further upfield
+      const score = progress * 0.6 + openness * 1.2 - d * 0.15;
+      if (score > bestScore) {
+        bestScore = score;
+        best = mate;
+      }
+    }
+    const pressured = nearestFoe < 7;
+    if (best && (pressured || bestScore > 14)) {
+      const d = Math.hypot(best.x - bot.x, best.y - bot.y);
+      const lead = 3 * atk; // lay it ahead of them, not at their feet
       executeKick(
-        ctx, match, ball, bot, KICK_NORMAL, 0.75 + roll * 2,
-        corner - ball.x, goalY - ball.y, lvl.shootErr
+        ctx, match, ball, bot, KICK_NORMAL, clamp(d / AI_PASS_MAX + 0.25, 0.25, 0.85),
+        best.x - ball.x, best.y + lead - ball.y, lvl.shootErr * 0.7
       );
       return;
     }
-    // pressured? pass to the most open teammate ahead
-    const nearestOpp = Math.min(
-      ...matchPlayers(ctx, match.id)
-        .filter(o => o.side !== bot.side && o.role === ROLE_OUTFIELD)
-        .map(o => Math.hypot(o.x - bot.x, o.y - bot.y)),
-      99
+    // CARRY: run at goal, but bend away from the nearest opponent so the
+    // dribble goes into space instead of straight into a tackle.
+    let cx = clamp(ball.x * 0.6, -PITCH_HALF_WID + 6, PITCH_HALF_WID - 6);
+    const closest = foes.reduce(
+      (a: PlayerRow | null, o) =>
+        !a || Math.hypot(o.x - bot.x, o.y - bot.y) < Math.hypot(a.x - bot.x, a.y - bot.y) ? o : a,
+      null
     );
-    if (nearestOpp < 5 && teammates.length > 0 && roll < 0.35) {
-      const mate = teammates[Math.floor(hash01(seed * 5.3) * teammates.length) % teammates.length];
-      const lead = 4 * atk;
-      executeKick(
-        ctx, match, ball, bot, KICK_NORMAL,
-        clamp(Math.hypot(mate.x - bot.x, mate.y - bot.y) / 40, 0.25, 0.8),
-        mate.x - ball.x, mate.y + lead - ball.y, lvl.shootErr * 0.7
-      );
+    if (closest && Math.hypot(closest.x - bot.x, closest.y - bot.y) < 12) {
+      cx = clamp(cx - Math.sign(closest.x - bot.x) * 10, -PITCH_HALF_WID + 6, PITCH_HALF_WID - 6);
+    }
+    steerBot(ctx, bot, cx, goalY, true);
+    return;
+  }
+
+  // ---- OFF THE BALL ----
+  let tx: number;
+  let ty: number;
+  if (isPresser) {
+    // The one player allowed to go to the ball.
+    tx = ball.x + ball.vx * 0.25 + noise(1) * lvl.reactErr;
+    ty = ball.y + ball.vy * 0.25 + noise(2) * lvl.reactErr;
+    const dist = Math.hypot(ball.x - bot.x, ball.y - bot.y);
+    const oppOwns = ball.hasOwner && possSide === 1 - bot.side;
+    if (
+      oppOwns && dist < 6 && bot.slideTicks === 0 && bot.stamina >= SLIDE_COST &&
+      hash01(seed * 11.7 + match.clockTicks * 0.31) < lvl.tackleChance
+    ) {
+      const len = dist || 1;
+      ctx.db.player.identity.update({
+        ...bot,
+        slideTicks: SLIDE_TOTAL,
+        slideDirX: (ball.x - bot.x) / len,
+        slideDirY: (ball.y - bot.y) / len,
+        stamina: Math.max(0, bot.stamina - SLIDE_COST),
+      });
       return;
     }
   } else {
-    const mineIsNearest = !teammates.some(
-      m =>
-        Math.hypot(m.x - ball.x, m.y - ball.y) <
-        Math.hypot(bot.x - ball.x, bot.y - ball.y) - 0.5
-    );
-    if (mineIsNearest) {
-      // chase a short prediction of the ball
-      tx = ball.x + ball.vx * 0.25 + noise(1) * lvl.reactErr;
-      ty = ball.y + ball.vy * 0.25 + noise(2) * lvl.reactErr;
-      // defending slide: ball owned by an opponent right next to us
-      const oppOwns = ball.hasOwner && !sameId(ball.ownerId, bot.identity);
-      const dist = Math.hypot(ball.x - bot.x, ball.y - bot.y);
-      if (
-        oppOwns && dist < 5 && bot.slideTicks === 0 &&
-        bot.stamina >= SLIDE_COST &&
-        hash01(seed * 11.7 + match.clockTicks * 0.31) < lvl.tackleChance
-      ) {
-        const len = dist || 1;
-        ctx.db.player.identity.update({
-          ...bot,
-          slideTicks: SLIDE_TOTAL,
-          slideDirX: (ball.x - bot.x) / len,
-          slideDirY: (ball.y - bot.y) / len,
-          stamina: Math.max(0, bot.stamina - SLIDE_COST),
-        });
-        return;
+    // Hold your station in the block.
+    const shape = teamShape(bot.side, ball.x, ball.y, possSide === bot.side);
+    const anchor = anchorFor(shape, posOf(bot.teamSlot), ball.x, ball.y);
+    tx = anchor.x + noise(3) * 1.5;
+    ty = anchor.y + noise(4) * 1.2;
+
+    // SEPARATION: repel from the nearest team-mate so two men never stack.
+    let nearMate: PlayerRow | null = null;
+    let nearD = AI_SEPARATION_R;
+    for (const m of mates) {
+      const d = Math.hypot(m.x - bot.x, m.y - bot.y);
+      if (d < nearD) {
+        nearD = d;
+        nearMate = m;
       }
-    } else {
-      // hold shape: my lane, goal side of the ball when defending
-      const teamSize = Math.max(1, teammates.length + 1);
-      tx = laneX(bot.teamSlot, teamSize) + noise(3) * 2;
-      const ballOurs = ball.hasOwner
-        ? (ctx.db.player.identity.find(ball.ownerId)?.side ?? bot.side) === bot.side
-        : ball.lastTouchSide === bot.side;
-      ty = ballOurs
-        ? clamp(ball.y + atk * 10, -PITCH_HALF_LEN + 6, PITCH_HALF_LEN - 6)
-        : clamp(ball.y - atk * 8, -PITCH_HALF_LEN + 6, PITCH_HALF_LEN - 6);
+    }
+    if (nearMate && nearD > 0.01) {
+      const push = (AI_SEPARATION_R - nearD) * 0.8;
+      tx += ((bot.x - nearMate.x) / nearD) * push;
+      ty += ((bot.y - nearMate.y) / nearD) * push;
+    }
+
+    // THE SECOND-MAN RULE: you are not the presser, so stay out of the ball's
+    // bubble. Structural, not advisory — it holds no matter what the duty
+    // logic above decided.
+    const bd = Math.hypot(tx - ball.x, ty - ball.y);
+    if (bd < AI_PRESS_BUBBLE && bd > 0.01) {
+      tx = ball.x + ((tx - ball.x) / bd) * AI_PRESS_BUBBLE;
+      ty = ball.y + ((ty - ball.y) / bd) * AI_PRESS_BUBBLE;
     }
   }
-  if (iOwn) {
-    // recompute target for the carry case (falls through when no kick fired)
-    tx = clamp(ball.x * 0.6, -PITCH_HALF_WID + 4, PITCH_HALF_WID - 4);
-    ty = goalY;
-  }
-  const dx = tx! - bot.x;
-  const dy = ty! - bot.y;
+  steerBot(ctx, bot, tx, ty, false);
+}
+
+// Point a bot at a spot with an ANALOG heading. Also writes dirX/dirY, which
+// the renderer reads as facing, but movement integrates mvX/mvY.
+function steerBot(ctx: Ctx, bot: PlayerRow, tx: number, ty: number, sprint: boolean) {
   const fresh = ctx.db.player.identity.find(bot.identity);
   if (!fresh) return;
+  const dx = tx - fresh.x;
+  const dy = ty - fresh.y;
+  const d = Math.hypot(dx, dy);
+  // Arrive radius: a bot standing on its anchor must not jitter around it.
+  const ARRIVE = 1.2;
+  const mvX = d > ARRIVE ? dx / d : 0;
+  const mvY = d > ARRIVE ? dy / d : 0;
   ctx.db.player.identity.update({
     ...fresh,
-    dirX: Math.abs(dx) > 1 ? Math.sign(dx) : 0,
-    dirY: Math.abs(dy) > 1 ? Math.sign(dy) : 0,
-    sprinting: Math.hypot(dx, dy) > 14 && fresh.stamina > 250,
+    mvX,
+    mvY,
+    dirX: Math.abs(mvX) > 0.35 ? Math.sign(mvX) : 0,
+    dirY: Math.abs(mvY) > 0.35 ? Math.sign(mvY) : 0,
+    sprinting: sprint && d > 14 && fresh.stamina > 250,
   });
 }
 
@@ -2934,7 +3466,7 @@ function keeperPlay(
   // Clear anything playable in reach — one-touch, upfield, toward a flank.
   const dist = Math.hypot(ball.x - keeper.x, ball.y - keeper.y);
   if (
-    ball.active && dist < KEEPER_CLEAR_RADIUS * lvl.reach && ball.z < 5 &&
+    ball.active && dist < KEEPER_CLEAR_RADIUS * lvl.reach && ball.z < 7 &&
     mayTouch(match, keeper.side)
   ) {
     const flank = ball.x >= 0 ? 1 : -1;
@@ -2942,9 +3474,9 @@ function keeperPlay(
     ctx.db.ball.matchId.update({
       ...ball,
       active: true,
-      vx: flank * 14 + (ctx.random() - 0.5) * 6,
+      vx: flank * 22 + (ctx.random() - 0.5) * 6,
       vy: -gs * KEEPER_CLEAR_SPEED * st.power,
-      vz: 13,
+      vz: 26, // it should clear somebody's head
       z: Math.max(ball.z, 0.5),
       lastTouchSide: keeper.side,
       lastTouchId: keeper.identity,
@@ -3068,6 +3600,98 @@ function resolveOutOfPlay(
   return false;
 }
 
+// Hand each human the footballer they should be driving. Runs every tick,
+// BEFORE resolveOutOfPlay (which ends the tick on a goal or a restart, i.e.
+// on exactly the ticks control most needs to move).
+//
+// Elections are per TARGET, not per human: resolve who should be handed over
+// once, then pick the single best pilot for them. A per-human loop reads
+// ctrlSeat from a stale snapshot and, in 2v2, lets two humans both claim the
+// same receiver — the second silently overwriting the first.
+function autoSwitchPass(ctx: Ctx, match: MatchRow, ball: BallRow | null | undefined) {
+  const roster = matchPlayers(ctx, match.id);
+  const people = roster.filter(p => !p.isBot && !p.spectator && p.matchId === match.id);
+  if (people.length === 0) return;
+
+  // Self-heal + lock decay. This one loop turns every possible token bug from
+  // permanent into a one-tick hiccup.
+  for (const person of people) {
+    if (person.switchLock > 0) {
+      ctx.db.player.identity.update({ ...person, switchLock: person.switchLock - 1 });
+    }
+    const held = roster.some(
+      b => b.side === person.side && b.role === ROLE_OUTFIELD && b.ctrlSeat === person.teamSlot
+    );
+    if (!held) controlledBody(ctx, ctx.db.player.identity.find(person.identity) ?? person);
+  }
+  if (match.graceTicks > 0) return; // a restart is being taken; leave control alone
+  if (!ball) return;
+
+  const live = matchPlayers(ctx, match.id);
+  const bodyOf = (person: PlayerRow) =>
+    live.find(
+      b => b.side === person.side && b.role === ROLE_OUTFIELD && b.ctrlSeat === person.teamSlot
+    );
+  const ownerRow = ball.hasOwner ? live.find(b => sameId(b.identity, ball.ownerId)) : undefined;
+  const leadX = ball.x + ball.vx * SWITCH_LEAD;
+  const leadY = ball.y + ball.vy * SWITCH_LEAD;
+
+  // Collect one proposal per human, then resolve collisions on the target.
+  const proposals: { person: PlayerRow; from: PlayerRow; to: PlayerRow; fromDist: number }[] = [];
+  for (const person of people) {
+    const fresh = ctx.db.player.identity.find(person.identity) ?? person;
+    if (fresh.switchLock > 0) continue;
+    const cur = bodyOf(fresh);
+    if (!cur) continue;
+    if (cur.kickHeld) continue; // never yank the stick out of a shot
+    const curDist = Math.hypot(cur.x - leadX, cur.y - leadY);
+
+    // 1. RECEPTION — the ball arrives at a team-mate. The keystone trigger:
+    //    without it you pass and then watch the AI play your football.
+    if (ownerRow && ownerRow.side === fresh.side && ownerRow.ctrlSeat === CTRL_NONE &&
+        ownerRow.role === ROLE_OUTFIELD) {
+      proposals.push({ person: fresh, from: cur, to: ownerRow, fromDist: curDist });
+      continue;
+    }
+    // 2. SLIDE STUN — you missed, you are on the floor. Hand over during the
+    //    stun (never during the lunge: you committed to that).
+    if (cur.slideTicks > 0 && cur.slideTicks <= SLIDE_ACTIVE_AFTER) {
+      const best = switchCandidates(ctx, fresh, cur)
+        .sort(
+          (a, b) =>
+            Math.hypot(a.x - leadX, a.y - leadY) - Math.hypot(b.x - leadX, b.y - leadY)
+        )[0];
+      if (best) proposals.push({ person: fresh, from: cur, to: best, fromDist: curDist });
+      continue;
+    }
+    // 3. LOOSE OR DEFENDING — gated on the ball NOT being ours. Note this
+    //    covers an opponent dribbling at our goal too: the carry writes
+    //    hasOwner every tick, so gating on !hasOwner would silently disable
+    //    the entire defensive half of the feature.
+    const ballIsOurs = !!ownerRow && ownerRow.side === fresh.side;
+    if (!ballIsOurs && curDist < AUTO_SWITCH_RANGE + AUTO_SWITCH_MARGIN) {
+      const best = switchCandidates(ctx, fresh, cur)
+        .map(b => ({ b, d: Math.hypot(b.x - leadX, b.y - leadY) }))
+        .sort((a, c) => a.d - c.d)[0];
+      if (best && best.d < AUTO_SWITCH_RANGE && best.d < curDist - AUTO_SWITCH_MARGIN) {
+        proposals.push({ person: fresh, from: cur, to: best.b, fromDist: curDist });
+      }
+    }
+  }
+
+  // One pilot per target: the human whose current man is FURTHEST from the
+  // ball has the least to lose by being moved.
+  const claimed = new Set<string>();
+  for (const p of proposals.sort((a, b) => b.fromDist - a.fromDist)) {
+    const key = p.to.identity.toHexString();
+    if (claimed.has(key)) continue;
+    const target = ctx.db.player.identity.find(p.to.identity);
+    if (!target || target.ctrlSeat !== CTRL_NONE) continue;
+    claimed.add(key);
+    bindPilot(ctx, p.person, p.from, target, AUTO_LOCK);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Simulation tick (30 Hz per live match)
 // ---------------------------------------------------------------------------
@@ -3165,6 +3789,31 @@ export const game_tick = spacetimedb.reducer(
     let ball = ctx.db.ball.matchId.find(match.id);
     const players = matchPlayers(ctx, match.id);
 
+    // How long this kickoff has been waiting to be taken. pauseTicks is unused
+    // during PHASE_KICKOFF, so it doubles as the timer.
+    if (match.phase === PHASE_KICKOFF && match.startTicks === 0) {
+      match = { ...match, pauseTicks: Math.min(65000, match.pauseTicks + 1) };
+      ctx.db.match.id.update(match);
+    }
+
+    // ONE snapshot of the roster, partitioned once, so the brain below adds
+    // no table reads and no per-bot filtering inside the 30 Hz loop.
+    const outBySide: PlayerRow[][] = [[], []];
+    for (const p of players) {
+      if (p.role === ROLE_OUTFIELD && !p.spectator) outBySide[p.side].push(p);
+    }
+    for (const side of [0, 1]) outBySide[side].sort((a, b) => a.teamSlot - b.teamSlot);
+    const carrier =
+      ball && ball.hasOwner ? players.find(q => sameId(q.identity, ball!.ownerId)) : undefined;
+    const possSide = carrier ? carrier.side : ball ? ball.lastTouchSide : 0;
+    if (ball && match.phase === PHASE_LIVE) {
+      const elected = electPresser(ctx, match, ball, outBySide);
+      if (elected !== match) {
+        match = elected;
+        ctx.db.match.id.update(match);
+      }
+    }
+
     // ---- Movement (humans by stick, outfield bots by brain, keepers) ----
     for (const p of players) {
       if (p.spectator) continue;
@@ -3209,26 +3858,36 @@ export const game_tick = spacetimedb.reducer(
       }
 
       // Outfield bot brain writes its stick (and may kick).
-      if (cur.isBot && match.phase === PHASE_LIVE && ball) {
-        const mates = players.filter(
-          m =>
-            m.side === cur!.side &&
-            m.role === ROLE_OUTFIELD &&
-            !m.spectator &&
-            !sameId(m.identity, cur!.identity)
-        );
+      // The single gate that turns the token into control. On today's roster
+      // this is provably identical to the old `cur.isBot` test — humans hold
+      // their own seat, every bot holds CTRL_NONE — but it now asks the right
+      // question: is a human's stick driving THIS body?
+      if (cur.ctrlSeat === CTRL_NONE && match.phase === PHASE_LIVE && ball) {
+        const mySlot = cur.teamSlot;
+        const mates = outBySide[cur.side].filter(m => m.teamSlot !== mySlot);
+        const foes = outBySide[1 - cur.side];
+        const isPresser =
+          (cur.side === 0 ? match.presser0 : match.presser1) === mySlot;
         botPlay(
-          ctx, match, lobby, cur, ball, mates,
-          Number(match.id % 100000n) + cur.side * 31 + cur.teamSlot * 17
+          ctx, match, lobby, cur, ball, mates, foes, isPresser, possSide,
+          // Seeded per body. Outfield teamSlot is unique per side, so no two
+          // bots ever draw the same noise and move as one.
+          Number(match.id % 100000n) + cur.side * 31 + mySlot * 17
         );
         ball = ctx.db.ball.matchId.find(match.id);
         match = ctx.db.match.id.find(match.id)!;
         if (match.state !== M_LIVE || (match.phase !== PHASE_LIVE && match.phase !== PHASE_KICKOFF)) return;
         cur = ctx.db.player.identity.find(p.identity);
         if (!cur || cur.slideTicks > 0) continue;
-      } else if (cur.isBot && match.phase === PHASE_KICKOFF && ball) {
+      } else if (cur.ctrlSeat === CTRL_NONE && match.phase === PHASE_KICKOFF && ball) {
         // bot kickoff: walk to the spot and poke it to a teammate
-        if (cur.side === match.kickoffSide && cur.teamSlot === 0 && match.startTicks === 0) {
+        const standIn =
+          match.pauseTicks > KICKOFF_AUTO
+            ? outBySide[cur.side].find(b => b.ctrlSeat === CTRL_NONE)?.teamSlot
+            : undefined;
+        const amTaker =
+          cur.teamSlot === 0 || (standIn !== undefined && cur.teamSlot === standIn);
+        if (cur.side === match.kickoffSide && amTaker && match.startTicks === 0) {
           const d = Math.hypot(ball.x - cur.x, ball.y - cur.y);
           if (d < KICK_RANGE) {
             executeKick(ctx, match, ball, cur, KICK_NORMAL, 0.3, (hash01(Number(match.id)) - 0.5), sideSign(cur.side) * 0.8);
@@ -3245,8 +3904,23 @@ export const game_tick = spacetimedb.reducer(
           });
           cur = ctx.db.player.identity.find(p.identity)!;
         } else {
-          ctx.db.player.identity.update({ ...cur, dirX: 0, dirY: 0 });
-          continue;
+          // Everyone else walks to their kickoff station. Freezing them here
+          // would leave eight of ten players standing perfectly still at the
+          // start of every half and after every goal — the first thing a
+          // player sees, and the thing that made this look unfinished.
+          const spot = kickoffSpot(cur.side, posOf(cur.teamSlot), match.kickoffSide);
+          const dx = spot.x - cur.x;
+          const dy = spot.y - cur.y;
+          const kd = Math.hypot(dx, dy) || 1;
+          ctx.db.player.identity.update({
+            ...cur,
+            mvX: kd > 1 ? dx / kd : 0,
+            mvY: kd > 1 ? dy / kd : 0,
+            dirX: Math.abs(dx) > 0.6 ? Math.sign(dx) : 0,
+            dirY: Math.abs(dy) > 0.6 ? Math.sign(dy) : 0,
+            sprinting: false,
+          });
+          cur = ctx.db.player.identity.find(p.identity)!;
         }
       }
 
@@ -3274,9 +3948,13 @@ export const game_tick = spacetimedb.reducer(
       let speed = PLAYER_SPEED * st.speed;
       if (wantSprint) speed *= SPRINT_MUL;
       if (owns) speed *= DRIBBLE_MUL;
-      const len = Math.hypot(cur.dirX, cur.dirY) || 1;
-      let x = clamp(cur.x + (cur.dirX / len) * speed * DT, -P_BOUNDS_X, P_BOUNDS_X);
-      let y = clamp(cur.y + (cur.dirY / len) * speed * DT, -P_BOUNDS_Y, P_BOUNDS_Y);
+      // Analog heading. A human's stick is eight-way so mv == dir for them;
+      // a bot steers on a real unit vector and stops zig-zagging.
+      const hx = cur.mvX !== 0 || cur.mvY !== 0 ? cur.mvX : cur.dirX;
+      const hy = cur.mvX !== 0 || cur.mvY !== 0 ? cur.mvY : cur.dirY;
+      const len = Math.hypot(hx, hy) || 1;
+      let x = clamp(cur.x + (hx / len) * speed * DT, -P_BOUNDS_X, P_BOUNDS_X);
+      let y = clamp(cur.y + (hy / len) * speed * DT, -P_BOUNDS_Y, P_BOUNDS_Y);
       // Kickoff discipline: stay in your half; non-kickoff side out of the circle.
       if (match.phase === PHASE_KICKOFF) {
         y = sideSign(cur.side) > 0 ? Math.max(y, 0.5) : Math.min(y, -0.5);
@@ -3328,12 +4006,17 @@ export const game_tick = spacetimedb.reducer(
     const prevZ = ball.z;
     if (ball.z > 0.01 || ball.vz > 0.01) {
       // airborne
+      // same drag in the air, on the full 3D speed
+      const sp3 = Math.hypot(ball.vx, ball.vy, ball.vz);
+      const dk = sp3 > 0 ? 1 / (1 + BALL_DRAG * sp3 * DT) : 1;
       ball = {
         ...ball,
         x: ball.x + ball.vx * DT,
         y: ball.y + ball.vy * DT,
         z: ball.z + ball.vz * DT + 0.5 * phys.gravity * DT * DT,
-        vz: ball.vz + phys.gravity * DT,
+        vx: ball.vx * dk,
+        vy: ball.vy * dk,
+        vz: (ball.vz + phys.gravity * DT) * dk,
       };
       if (ball.z <= 0 && ball.vz < 0) {
         // bounce
@@ -3341,16 +4024,31 @@ export const game_tick = spacetimedb.reducer(
         ball = {
           ...ball,
           z: 0,
-          vz: vz < 2.5 ? 0 : vz,
+          // absolute threshold, so it scales with GRAVITY (2.5 * 38/60)
+          vz: vz < 1.6 ? 0 : vz,
           vx: ball.vx * 0.9,
           vy: ball.vy * 0.9,
         };
       }
     } else {
-      // rolling
-      const keep = Math.exp(-phys.friction * DT);
-      let vx = ball.vx * keep;
-      let vy = ball.vy * keep;
+      // Rolling. TWO terms, because one is not enough:
+      //   - quadratic AIR DRAG (dv/dt = -k v^2, integrated exactly below).
+      //     This is what actually stops a struck ball: it decays speed
+      //     exponentially with DISTANCE, so a 100-unit shot is still hot at
+      //     30 units but a pass has settled by the time it arrives.
+      //   - Coulomb ROLLING resistance, a constant decel that brings a slow
+      //     ball to rest instead of letting it creep forever.
+      // Rolling resistance alone is physically right for a slow ball and
+      // catastrophic for a fast one: at 2.4 units/s^2 a 60-unit pass rolls
+      // 750 units, and this pitch is 132 long — so every pass left the field.
+      const sp = Math.hypot(ball.vx, ball.vy);
+      let k = 0;
+      if (sp > 0) {
+        const afterDrag = sp / (1 + BALL_DRAG * sp * DT);
+        k = Math.max(0, afterDrag - phys.friction * DT) / sp;
+      }
+      let vx = ball.vx * k;
+      let vy = ball.vy * k;
       if (Math.hypot(vx, vy) < 0.6) {
         vx = 0;
         vy = 0;
@@ -3471,7 +4169,7 @@ export const game_tick = spacetimedb.reducer(
           fx = 0;
           fy = attackSign(owner.side);
         }
-        const lead = TOUCH_AHEAD + (owner.sprinting && moving ? 1.2 : 0);
+        const lead = TOUCH_AHEAD + (owner.sprinting && moving ? 3.0 : 0);
         const txp = owner.x + fx * lead;
         const typ = owner.y + fy * lead;
         ball = {
@@ -3492,6 +4190,11 @@ export const game_tick = spacetimedb.reducer(
     } else if (ball.hasOwner) {
       ball = { ...ball, hasOwner: false, ownerId: ZERO_ID };
     }
+
+    // Hand control to the right footballer BEFORE the out-of-play test, which
+    // returns and ends the tick on a goal or a restart.
+    ctx.db.ball.matchId.update(ball);
+    autoSwitchPass(ctx, match, ball);
 
     // Out of play? Judged last, so a carried ball counts like a struck one.
     if (resolveOutOfPlay(ctx, match, ball, { x: prevX, y: prevY, z: prevZ }, fresh)) return;

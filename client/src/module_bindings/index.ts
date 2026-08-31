@@ -53,6 +53,7 @@ import SetNameReducer from "./set_name_reducer";
 import SetTournamentSettingsReducer from "./set_tournament_settings_reducer";
 import SpectateMatchReducer from "./spectate_match_reducer";
 import StartTournamentReducer from "./start_tournament_reducer";
+import SwitchPlayerReducer from "./switch_player_reducer";
 import TackleReducer from "./tackle_reducer";
 
 // Import all procedure arg schemas
@@ -257,6 +258,7 @@ const reducersSchema = __reducers(
   __reducerSchema("set_tournament_settings", SetTournamentSettingsReducer),
   __reducerSchema("spectate_match", SpectateMatchReducer),
   __reducerSchema("start_tournament", StartTournamentReducer),
+  __reducerSchema("switch_player", SwitchPlayerReducer),
   __reducerSchema("tackle", TackleReducer),
 );
 

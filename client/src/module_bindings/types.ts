@@ -172,6 +172,8 @@ export const Match = __t.object("Match", {
   haltedAt: __t.u64(),
   haltUntil: __t.u64(),
   haltName: __t.string(),
+  presser0: __t.u8(),
+  presser1: __t.u8(),
 });
 export type Match = __Infer<typeof Match>;
 
@@ -222,6 +224,12 @@ export const Player = __t.object("Player", {
   isBot: __t.bool(),
   spectator: __t.bool(),
   teamSlot: __t.u8(),
+  ctrlSeat: __t.u8(),
+  switchLock: __t.u8(),
+  matchBot: __t.bool(),
+  switchIdx: __t.u8(),
+  mvX: __t.f32(),
+  mvY: __t.f32(),
 });
 export type Player = __Infer<typeof Player>;
 

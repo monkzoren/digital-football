@@ -40,4 +40,6 @@ export default __t.row({
   haltedAt: __t.u64().name("halted_at"),
   haltUntil: __t.u64().name("halt_until"),
   haltName: __t.string().name("halt_name"),
+  presser0: __t.u8().name("presser_0"),
+  presser1: __t.u8().name("presser_1"),
 });

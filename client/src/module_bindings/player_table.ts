@@ -35,4 +35,10 @@ export default __t.row({
   isBot: __t.bool().name("is_bot"),
   spectator: __t.bool(),
   teamSlot: __t.u8().name("team_slot"),
+  ctrlSeat: __t.u8().name("ctrl_seat"),
+  switchLock: __t.u8().name("switch_lock"),
+  matchBot: __t.bool().name("match_bot"),
+  switchIdx: __t.u8().name("switch_idx"),
+  mvX: __t.f32().name("mv_x"),
+  mvY: __t.f32().name("mv_y"),
 });
