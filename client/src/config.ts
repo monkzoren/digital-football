@@ -61,8 +61,8 @@ export const ROLE_KEEPER = 1;
 // SQUAD_SIZE rigs per side (rigSlot = side * SQUAD_SIZE + seat); the module
 // gives keepers teamSlot 0, the same seat as the first outfielder, so without
 // a seat of their own the two share a rig and one of them is never drawn.
-export const SQUAD_SIZE = 5;
-export const KEEPER_RIG_SEAT = 4;
+export const SQUAD_SIZE = 4;
+export const KEEPER_RIG_SEAT = 3;
 
 // Match phases (match.phase) — mirrors PHASE_* in the module.
 export const PHASE_KICKOFF = 1;

@@ -981,17 +981,22 @@ function lobbyPhysics(lobby: LobbyRow | null | undefined): Phys {
 // Anchors are FRACTIONS of the pitch, never absolute units, so re-sizing the
 // pitch can never silently break the shape.
 // ---------------------------------------------------------------------------
+// 4v4: a forward and two wide men. There is no spare defender — the wide
+// pair ARE the cover, which is why the shape rules below apply to them.
 const POS_ST = 0;
-const POS_LM = 1;
-const POS_RM = 2;
-const POS_CB = 3;
-const OUTFIELD_PER_SIDE = 4;
+const POS_LW = 1;
+const POS_RW = 2;
+const OUTFIELD_PER_SIDE = 3;
 
+// 4v4 is three outfielders and a keeper, so the shape is a TRIANGLE, not a
+// diamond: a forward, and two wide men who are both the width in attack and
+// the cover in defence. With only three bodies there is no spare man, which
+// is what makes small-sided football fast — every one of them has a job every
+// second, and losing one to a ball-chase costs a third of the team.
 const FORMATION = [
-  { name: 'ST', ax: 0.0, ay: 0.42 },
-  { name: 'LM', ax: -0.55, ay: 0.02 },
-  { name: 'RM', ax: 0.55, ay: 0.02 },
-  { name: 'CB', ax: 0.0, ay: -0.44 },
+  { name: 'ST', ax: 0.0, ay: 0.44 },
+  { name: 'LW', ax: -0.5, ay: -0.16 },
+  { name: 'RW', ax: 0.5, ay: -0.16 },
 ];
 const posOf = (teamSlot: number) => clamp(teamSlot, 0, OUTFIELD_PER_SIDE - 1);
 
@@ -1052,7 +1057,9 @@ function anchorFor(shape: Shape, pos: number, ballX: number, ballY: number): { x
   // The two rules that keep the shape honest: a centre-back that lets the ball
   // get behind it is not a centre-back, and a striker who tracks all the way
   // back is why the pitch ends up with everyone in one half.
-  if (pos === POS_CB) u = Math.min(u, ballU - CB_GOALSIDE);
+  // With three outfielders the wide men are the cover: neither of them may
+  // let the ball get behind them, or the keeper is on his own.
+  if (pos !== POS_ST) u = Math.min(u, ballU - CB_GOALSIDE);
   if (pos === POS_ST) u = Math.max(u, -PITCH_HALF_LEN * ST_MAX_TRACKBACK);
   u = clamp(u, -(PITCH_HALF_LEN - 4), PITCH_HALF_LEN - 6);
   const x = clamp(shape.shiftX + f.ax * PITCH_HALF_WID, -(PITCH_HALF_WID - 3), PITCH_HALF_WID - 3);
@@ -3734,6 +3741,31 @@ function botPlay(
   }
 
   // ---- OFF THE BALL ----
+  // RECEIVE. A pass is running to us: go and MEET it. Nothing did this before
+  // — the intended receiver stood on his formation anchor while the ball
+  // rolled past him — which is why passing felt like giving the ball away.
+  // Exactly one man takes this job (the one who can get there soonest), so it
+  // cannot turn back into four players converging on the ball.
+  const ballSpeed = Math.hypot(ball.vx, ball.vy);
+  if (
+    !ball.hasOwner && ballSpeed > 6 && heldBySide < 0 &&
+    ball.lastTouchSide === bot.side && ball.z < CONTROL_MAX_Z + 3
+  ) {
+    const sprintSpeed = (p: PlayerRow) =>
+      PLAYER_SPEED * charStat(p.characterId).speed * SPRINT_MUL;
+    const mine = interceptPoint(bot.x, bot.y, sprintSpeed(bot), ball);
+    let bestT = mine.t;
+    for (const m of mates) {
+      if (m.role !== ROLE_OUTFIELD) continue;
+      const t = interceptPoint(m.x, m.y, sprintSpeed(m), ball).t;
+      if (t < bestT) bestT = t;
+    }
+    if (mine.t <= bestT) {
+      steerBot(ctx, bot, mine.x, mine.y, true);
+      return;
+    }
+  }
+
   let tx: number;
   let ty: number;
   if (isPresser && heldBySide < 0) {
@@ -3758,11 +3790,66 @@ function botPlay(
       return;
     }
   } else {
-    // Hold your station in the block.
+    // ---- OFF-BALL DUTY ----------------------------------------------------
+    // Priority order. Each branch is a JOB, not a place to stand and wait.
     const shape = teamShape(bot.side, ball.x, ball.y, possSide === bot.side);
     const anchor = anchorFor(shape, posOf(bot.teamSlot), ball.x, ball.y);
     tx = anchor.x + noise(3) * 1.5;
     ty = anchor.y + noise(4) * 1.2;
+
+    const myGoal = sideSign(bot.side) * PITCH_HALF_LEN;
+    const restartPending = match.graceTicks > 0;
+    const ourRestart = restartPending && match.restartSide === bot.side;
+    const carrier = ball.hasOwner ? [...mates].find(m => sameId(m.identity, ball.ownerId)) : undefined;
+    const weOwn = possSide === bot.side && (ball.hasOwner || restartPending);
+
+    if (restartPending && !ourRestart) {
+      // THEIR RESTART. Stand off it — the laws say five metres — and get
+      // goal-side of the man you are nearest, instead of crowding the taker.
+      const away = Math.hypot(bot.x - ball.x, bot.y - ball.y) || 1;
+      tx = ball.x + ((bot.x - ball.x) / away) * RESTART_RETREAT;
+      ty = ball.y + ((bot.y - ball.y) / away) * RESTART_RETREAT;
+      // bias the retreat toward our own goal, so backing off also defends
+      ty = ty * 0.65 + myGoal * 0.35;
+    } else if (ourRestart) {
+      // OUR RESTART. One man takes it; the others OFFER — one short and
+      // certain, one long up the line. Before this they carried on holding
+      // their block anchor, which is why a throw-in had nobody to throw to.
+      const taker = takerOf(mates, bot, match.restartX, match.restartY);
+      if (!sameId(taker.identity, bot.identity)) {
+        const up = attackSign(bot.side);
+        const wide = match.restartX >= 0 ? -1 : 1; // show on the far side
+        const short = bot.teamSlot % 2 === 0;
+        const reach = short ? OPTION_SHORT : OPTION_LONG;
+        tx = clamp(match.restartX + wide * reach * 0.55, -(PITCH_HALF_WID - 4), PITCH_HALF_WID - 4);
+        ty = clamp(match.restartY + up * reach, -(PITCH_HALF_LEN - 5), PITCH_HALF_LEN - 5);
+      }
+    } else if (heldBySide === bot.side) {
+      // OUR KEEPER HAS IT. Break wide and get outside the area to be thrown
+      // to — do not stand in front of him.
+      const gl = sideSign(bot.side) * PITCH_HALF_LEN;
+      tx = (bot.x >= 0 ? 1 : -1) * (PITCH_HALF_WID - 8);
+      ty = gl - sideSign(bot.side) * (BOX_DEPTH + 8);
+    } else if (heldBySide >= 0) {
+      // THEIR KEEPER HAS IT. There is nothing to win: drop into shape rather
+      // than standing over him waiting for a drop that the law will not give.
+      ty = ty * 0.5 + myGoal * 0.5;
+    } else if (weOwn && carrier) {
+      // WE HAVE IT. One man SUPPORTS from behind the ball so there is always
+      // a safe pass backwards, the other ADVANCES beyond it to stretch them.
+      const up = attackSign(bot.side);
+      const supporting =
+        Math.hypot(bot.x - carrier.x, bot.y - carrier.y) <
+        Math.hypot(bot.x - carrier.x, bot.y - (carrier.y + up * ADVANCE_AHEAD));
+      const side = bot.x >= carrier.x ? 1 : -1;
+      if (supporting) {
+        tx = clamp(carrier.x + side * 12, -(PITCH_HALF_WID - 4), PITCH_HALF_WID - 4);
+        ty = clamp(carrier.y - up * SUPPORT_BEHIND, -(PITCH_HALF_LEN - 5), PITCH_HALF_LEN - 5);
+      } else {
+        tx = clamp(carrier.x + side * 15, -(PITCH_HALF_WID - 4), PITCH_HALF_WID - 4);
+        ty = clamp(carrier.y + up * ADVANCE_AHEAD, -(PITCH_HALF_LEN - 5), PITCH_HALF_LEN - 5);
+      }
+    }
 
     // SEPARATION: repel from the nearest team-mate so two men never stack.
     let nearMate: PlayerRow | null = null;
@@ -3807,6 +3894,83 @@ function botPlay(
     }
   }
   steerBot(ctx, bot, tx, ty, clearingBox);
+}
+
+// ---------------------------------------------------------------------------
+// OFF-BALL DUTIES
+//
+// The old brain had exactly two off-ball behaviours: press the ball, or stand
+// on your formation anchor. That is why every complaint about this game came
+// back to the same thing — nobody offered for a pass, nobody knew what to do
+// at a restart, and a keeper with the ball in his hands still had an opponent
+// stood over him. A footballer without the ball is not idle; he has a job,
+// and it changes with the state of the play.
+//
+// These are assigned fresh every tick, in priority order, and each one is a
+// POSITION the man wants to be in. One rule survives all of them: only the
+// elected presser and a designated receiver may come near the ball, which is
+// what keeps four bodies from converging on it.
+// ---------------------------------------------------------------------------
+
+// How far a man stands off the ball at an opponent's restart. Futsal says 5
+// metres; this pitch is scaled so a metre is about 3.3 units.
+const RESTART_RETREAT = 16;
+// A short option for a restart: close enough to be a certain pass.
+const OPTION_SHORT = 13;
+// The long option, up the line.
+const OPTION_LONG = 30;
+// A supporting man plays BEHIND the carrier — that is what makes him a safe
+// outlet rather than another body in the same space.
+const SUPPORT_BEHIND = 14;
+// A man running beyond the carrier, stretching the defence.
+const ADVANCE_AHEAD = 20;
+
+/**
+ * Where a loose ball can first be met, and how long that takes. Used to decide
+ * who goes and gets a pass — a receiver who waits on his anchor while the ball
+ * rolls past him is the single most unfootball thing an AI can do.
+ *
+ * Walks the ball forward under the same drag the integrator uses and returns
+ * the first sampled point the player could actually reach in time.
+ */
+function interceptPoint(
+  px: number, py: number, speed: number, ball: BallRow
+): { x: number; y: number; t: number } {
+  let bx = ball.x;
+  let by = ball.y;
+  let vx = ball.vx;
+  let vy = ball.vy;
+  const STEP = 0.1;
+  // 2.4 is the standard carpet's rolling resistance (SURFACES[0].friction).
+  // The prediction only has to be good enough to pick a man, so it does not
+  // need the actual pitch's number.
+  for (let i = 1; i <= 20; i++) {
+    const sp = Math.hypot(vx, vy);
+    if (sp > 0.01) {
+      const k = Math.max(0, sp / (1 + BALL_DRAG * sp * STEP) - 2.4 * STEP) / sp;
+      vx *= k;
+      vy *= k;
+    }
+    bx += vx * STEP;
+    by += vy * STEP;
+    const t = i * STEP;
+    if (Math.hypot(bx - px, by - py) <= speed * t) return { x: bx, y: by, t };
+  }
+  return { x: bx, y: by, t: 2 };
+}
+
+/** The man on this side nearest the restart spot — the one who will take it. */
+function takerOf(mates: PlayerRow[], me: PlayerRow, sx: number, sy: number): PlayerRow {
+  let best = me;
+  let bestD = Math.hypot(me.x - sx, me.y - sy);
+  for (const m of mates) {
+    const d = Math.hypot(m.x - sx, m.y - sy);
+    if (d < bestD) {
+      bestD = d;
+      best = m;
+    }
+  }
+  return best;
 }
 
 // Point a bot at a spot with an ANALOG heading. Also writes dirX/dirY, which
@@ -3999,6 +4163,14 @@ function keeperPlay(
     return;
   }
 
+  // HIS FEET ARE HIS OWN. Everything above this line is the keeper's HANDS —
+  // catching, holding, distributing — and that applies whoever is driving him.
+  // Everything below is the line-keeping AI, and running it on a keeper a
+  // human is steering meant the stick moved him and the AI dragged him back,
+  // every tick, which is exactly why the keeper felt stiff and unresponsive
+  // when every outfielder felt fine.
+  if (keeper.ctrlSeat !== CTRL_NONE) return;
+
   // Position: hold the ball-to-goal line until a shot is actually on its way,
   // then commit to where it will cross — late, and not quite exactly.
   let targetX = clamp(ball.x * 0.55, -KEEPER_MAX_X, KEEPER_MAX_X);
@@ -4026,12 +4198,23 @@ function keeperPlay(
   const step = Math.min(len, speed * DT);
   const nx = len > 0.01 ? keeper.x + (dx / len) * step : keeper.x;
   const ny = len > 0.01 ? keeper.y + (dy / len) * step : keeper.y;
+  // PUBLISH A VELOCITY. keeperPlay moves the keeper by writing x/y directly,
+  // outside the movement integrator, and it never wrote velX/velY — so the
+  // client, which dead-reckons every body along that vector between the 30 Hz
+  // rows, had nothing to predict the keeper with and stepped him thirty times
+  // a second while all ten outfielders glided. That is the whole reason the
+  // keeper looked janky next to everyone else. It is a FRACTION of top speed,
+  // the same units the integrator writes, so the client needs no special case.
+  const vScale = PLAYER_SPEED * charStat(keeper.characterId).speed;
+  const moved = len > 0.01 ? step / DT : 0;
   ctx.db.player.identity.update({
     ...keeper,
     x: clamp(nx, -KEEPER_MAX_X, KEEPER_MAX_X),
     y: gs > 0
       ? clamp(ny, PITCH_HALF_LEN - KEEPER_RANGE_Y, PITCH_HALF_LEN - 0.5)
       : clamp(ny, -(PITCH_HALF_LEN - 0.5), -(PITCH_HALF_LEN - KEEPER_RANGE_Y)),
+    velX: len > 0.01 ? ((dx / len) * moved) / vScale : 0,
+    velY: len > 0.01 ? ((dy / len) * moved) / vScale : 0,
     // expose intent so the client can lean/dive the model
     dirX: Math.abs(dx) > 0.7 ? Math.sign(dx) : 0,
     dirY: Math.abs(dy) > 0.7 ? Math.sign(dy) : 0,
@@ -4414,6 +4597,25 @@ export const game_tick = spacetimedb.reducer(
     if (match.phase === PHASE_KICKOFF && match.startTicks === 0) {
       match = { ...match, pauseTicks: Math.min(65000, match.pauseTicks + 1) };
       ctx.db.match.id.update(match);
+      // HAND THE KICKOFF TO THE MAN IN THE CIRCLE. The taker is always slot 0,
+      // but a human's stick could be on any of the three — and standing twenty
+      // units away from a ball only the taker can play looks exactly like a
+      // kickoff that does not work. Done once, on the first tick, so it never
+      // fights a switch the player makes afterwards.
+      if (match.pauseTicks === 1) {
+        const koSide = match.kickoffSide;
+        const taker = matchPlayers(ctx, match.id).find(
+          p =>
+            p.side === koSide && p.role === ROLE_OUTFIELD &&
+            !p.spectator && !p.sentOff && p.teamSlot === 0
+        );
+        const person = matchPlayers(ctx, match.id).find(
+          p => !p.isBot && !p.spectator && p.side === koSide && p.role === ROLE_OUTFIELD
+        );
+        if (taker && person) {
+          bindPilot(ctx, person, controlledBody(ctx, person), taker, SWITCH_LOCK);
+        }
+      }
     }
 
     // ONE snapshot of the roster, partitioned once, so the brain below adds
@@ -4550,7 +4752,19 @@ export const game_tick = spacetimedb.reducer(
         if (cur.side === match.kickoffSide && amTaker && match.startTicks === 0) {
           const d = Math.hypot(ball.x - cur.x, ball.y - cur.y);
           if (d < KICK_RANGE) {
-            executeKick(ctx, match, ball, cur, KICK_NORMAL, 0.3, (hash01(Number(match.id)) - 0.5), sideSign(cur.side) * 0.8);
+            // PLAY IT TO A TEAM-MATE. This used to poke the ball at a random
+            // x offset and sideSign(side) in y — which is the direction of
+            // your OWN goal — so a kickoff was a random nudge backwards and
+            // nobody was ever passed to.
+            const { mates: koMates, foes: koFoes } = sidesOf(ctx, cur, cur);
+            const koTarget = pickPassTarget(
+              cur, koMates, koFoes, 0, attackSign(cur.side), PITCH_HALF_LEN * 0.6
+            );
+            executeKick(
+              ctx, match, ball, cur, KICK_NORMAL, 0.32,
+              koTarget ? koTarget.x - ball.x : (hash01(Number(match.id)) - 0.5) * 12,
+              koTarget ? koTarget.y - ball.y : attackSign(cur.side) * 12
+            );
             ctx.db.match.id.update({ ...match, phase: PHASE_LIVE, graceTicks: 0, pointMsg: '' });
             match = ctx.db.match.id.find(match.id)!;
             ball = ctx.db.ball.matchId.find(match.id);
@@ -4645,7 +4859,15 @@ export const game_tick = spacetimedb.reducer(
       for (const p of players) {
         if (p.role !== ROLE_KEEPER) continue;
         const cur = ctx.db.player.identity.find(p.identity);
-        if (cur) keeperPlay(ctx, match, lobby, cur, ctx.db.ball.matchId.find(match.id)!);
+        if (!cur) continue;
+        // A keeper a HUMAN is driving has already been moved by the stick in
+        // the movement loop above. Running the line-keeping AI over the top of
+        // that made the two fight for the same body every single tick: the
+        // stick moved him, the AI dragged him back to his line, and the result
+        // read as a keeper who was stiff, laggy and would not go where he was
+        // pointed. His hands still work — the handling branch runs for him —
+        // but his feet are his own.
+        keeperPlay(ctx, match, lobby, cur, ctx.db.ball.matchId.find(match.id)!);
       }
       match = ctx.db.match.id.find(match.id)!;
       if (match.state !== M_LIVE) return;
@@ -4875,7 +5097,31 @@ export const game_tick = spacetimedb.reducer(
         const dx = ball.x - owner.x;
         const dy = ball.y - owner.y;
         const gap = Math.hypot(dx, dy);
-        if (!moving) {
+        // FIRST TOUCH. Taking the ball is an action, not a state change. The
+        // touch cycle only writes a velocity once you have CAUGHT UP to the
+        // ball, so a pass arriving at 30 units/s kept every bit of its pace
+        // and rolled straight through the receiver and out of his keeping
+        // radius — which is exactly the "you cannot keep the ball after
+        // receiving it" everyone hits. The tick you take possession, you kill
+        // it: the pace comes off and it settles in front of you.
+        //
+        // How well is down to the player's control stat and how hard the ball
+        // was travelling, so a laser pass is genuinely harder to take down
+        // than a rolled one and a heavy touch can still be pounced on.
+        const takingOver = !ball.hasOwner || !sameId(ball.ownerId, owner.identity);
+        if (takingOver) {
+          const inSpeed = Math.hypot(ball.vx, ball.vy);
+          const ctrl = charStat(owner.characterId).curl; // "curl" is this roster's ball-control stat
+          // a clean touch leaves it almost dead; a poor one lets it run on
+          const keep = clamp(TRAP_DAMP * (1.6 - ctrl) * (0.5 + inSpeed / CONTROL_MAX_SPEED), 0, 0.6);
+          ball = {
+            ...ball,
+            vx: ball.vx * keep + fx * 2,
+            vy: ball.vy * keep + fy * 2,
+            vz: 0,
+            z: 0,
+          };
+        } else if (!moving) {
           // Standing over it: kill the roll so close control is close
           // control, and nudge it to the near side of the boot.
           const settleX = owner.x + fx * TOUCH_TRIGGER;
