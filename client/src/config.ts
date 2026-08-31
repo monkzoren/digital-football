@@ -38,9 +38,14 @@ export const CENTER_CIRCLE_R = 10;
 export const BALL_RADIUS = 0.45;
 export const GRAVITY = -38;
 export const PLAYER_SPEED = 15.5;
-// Movement ramps rather than snapping — mirrors ACCEL_RATE/BRAKE_RATE. The
-// client dead-reckons at the CURRENT velocity (player.velX/velY), so it does
-// not need the rates, only the top speed they ease toward.
+// Sprint multiplier — mirrors SPRINT_MUL. It lived in main.ts and drifted to
+// 1.34 against the module's 1.6, so every sprint under-predicted by 19% and
+// the correction showed up as jitter exactly when you were moving fastest.
+// It lives here now, next to PLAYER_SPEED, because this file IS the mirror.
+export const SPRINT_MUL = 1.6;
+// Movement is INSTANT — the stick IS the velocity, there are no accel/brake
+// rates to mirror. The client dead-reckons along player.velX/velY, so the top
+// speed and the sprint multiplier above are all it needs.
 export const CONTROL_RADIUS = 2.8; // ball inside this sticks to your feet
 export const KICK_RANGE = 3.4;
 export const STAMINA_MAX = 1000;

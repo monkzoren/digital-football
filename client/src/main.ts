@@ -2,7 +2,7 @@ import './update-check';
 import { DbConnection } from './module_bindings';
 import type { Identity } from 'spacetimedb';
 import {
-  SPACETIMEDB_URI, DATABASE_NAME, GRAVITY, PLAYER_SPEED, CHAR_SPEED, TICK_HZ,
+  SPACETIMEDB_URI, DATABASE_NAME, GRAVITY, PLAYER_SPEED, SPRINT_MUL, CHAR_SPEED, TICK_HZ,
   PHASE_KICKOFF, PHASE_LIVE, PHASE_PAUSE, PHASE_OVER,
   STAMINA_MAX,
   RK_NONE, RK_KICKOFF, RK_THROWIN, RK_GOALKICK, RK_CORNER, RK_HALFTIME, RK_OVERTIME, RK_DROP,
@@ -392,9 +392,6 @@ async function connect() {
 const playerStamp = new Map<string, number>();
 const smoothPos = new Map<string, { x: number; y: number }>();
 
-// Sprint multiplier — mirrors SPRINT_MUL in spacetimedb/src/index.ts.
-const SPRINT_MUL = 1.34;
-
 // Smoothed render position of the ball, so a dribble does not strobe.
 let smoothBall: { x: number; y: number; z: number } | null = null;
 
@@ -416,7 +413,14 @@ function renderPosition(p: any, now: number, frameDt: number): { x: number; y: n
   const ty = p.y + vy * speed * elapsed;
   let sp = smoothPos.get(hex);
   if (!sp || Math.hypot(sp.x - tx, sp.y - ty) > 12) sp = { x: tx, y: ty };
-  const alpha = 1 - Math.exp(-frameDt * (sliding ? 4.5 : 11));
+  // The smoother exists to hide the 30 Hz step in OTHER people's rows. On the
+  // body my own stick is driving it is pure added latency: rate 11 is a ~90 ms
+  // time constant, stacked on top of the tick and the round trip, and that is
+  // what reads as floaty, unresponsive input. My own man gets a rate stiff
+  // enough to absorb a one-tick correction inside a tick or two and no more.
+  const mine = hex === controlBodyKey;
+  const rate = sliding ? 4.5 : mine ? 34 : 11;
+  const alpha = 1 - Math.exp(-frameDt * rate);
   sp = { x: sp.x + (tx - sp.x) * alpha, y: sp.y + (ty - sp.y) * alpha };
   smoothPos.set(hex, sp);
   return sp;
@@ -4142,11 +4146,11 @@ function frame() {
       ? // the same fallback the module uses: until my first input nothing
         // carries my seat yet, and a client that thinks it has no man to
         // follow would put the camera into its spectator wander
+        // EVERY body, keeper included — filtering this to outfielders is what
+        // makes the camera and the control marker lose the man the moment
+        // control lands in goal.
         (players.find(
-          p =>
-            p.side === me.side &&
-            (p.role ?? 0) !== ROLE_KEEPER &&
-            p.ctrlSeat === (me.teamSlot ?? 0)
+          p => p.side === me.side && p.ctrlSeat === (me.teamSlot ?? 0)
         ) ?? players.find(p => p.identity.toHexString() === myHex()))
       : undefined;
   noteControlBody(focusBody ? focusBody.identity.toHexString() : '');
