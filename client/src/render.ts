@@ -54,6 +54,9 @@ export interface RenderPlayer {
   kickKind: number; // 0 normal · 1 chip
   kickHeld: boolean;
   slideTicks: number; // >0 = slide tackle lunge/recovery
+  diveTicks?: number; // keeper only: >0 = airborne, committed to a save
+  diveDirX?: number;
+  diveDirY?: number;
   role: number; // 0 outfield · 1 keeper
   dirX: number;
   dirY: number;
@@ -416,6 +419,9 @@ interface PlayerRig {
   prevYaw: number;
   pivotUntil: number; // plant-and-turn timer: a hard reverse is a step, not a spin
   pivotDir: number;
+  diveStart: number; // -1 = on his feet; else when this keeper left the ground
+  diveDir: number; // which side he went, for the lean and the arm that leads
+  prevDive: number;
   // animation state
   kickStart: number; // -1 = not kicking
   kickAnim: KickKind;
@@ -438,6 +444,8 @@ interface PlayerRig {
   prevSlide: number;
 }
 
+// Flight time of a keeper's dive — mirrors DIVE_TICKS in the module.
+const KEEPER_DIVE_MS = 550;
 const SLIDE_MS = 1000; // matches the server's SLIDE_TOTAL window
 
 // Piecewise channel evaluator with smoothstep easing between keys.
@@ -1692,6 +1700,9 @@ function makePlayerRig(side: number, intoScene: THREE.Scene = scene3): PlayerRig
     prevYaw: side === 0 ? Math.PI : 0,
     pivotUntil: -1e9,
     pivotDir: 1,
+    diveStart: -1,
+    diveDir: 1,
+    prevDive: 0,
     kickStart: -1,
     kickAnim: 'drive',
     kickLow: false,
@@ -1847,6 +1858,30 @@ const PIVOT_MS = 260;
 // footballer.
 function idlePose(pl: { role?: number }, now: number, seed: number): Pose {
   return (pl.role ?? 0) === ROLE_KEEPER ? keeperSetPose(now, seed) : readyPose(now, seed);
+}
+
+// A keeper full stretch. He leaves the ground along the dive, body laid out
+// flat, both arms thrown at the ball and the trailing leg extended behind for
+// the counterweight. `k` runs 0 (take-off) to 1 (landing).
+function keeperDivePose(k: number, dir: number): Pose {
+  const air = Math.sin(clamp01(k) * Math.PI); // peak height mid-flight
+  return {
+    ...ZERO_POSE,
+    leanF: 0.15,
+    leanS: dir * 0.5 * air,
+    twist: dir * 0.3 * air,
+    crouch: k < 0.12 ? 0.45 * (1 - k / 0.12) : 0, // the coil before take-off
+    // legs together and stretched out behind the line of the dive
+    thighL: 0.15 - 0.5 * air, calfL: 0.35 * air,
+    thighR: 0.15 - 0.35 * air, calfR: 0.55 * air,
+    // both gloves thrown at the ball, the lead arm fully extended
+    shLx: -1.5 * air - 0.3, shLz: (dir > 0 ? 1 : 0.35) * 1.15 * air, elL: -0.15,
+    shRx: -1.5 * air - 0.3, shRz: -(dir < 0 ? 1 : 0.35) * 1.15 * air, elR: -0.15,
+  };
+}
+
+function clamp01(v: number): number {
+  return v < 0 ? 0 : v > 1 ? 1 : v;
 }
 
 // Plant-and-turn. A footballer reversing does not rotate on the spot like a
@@ -3726,6 +3761,22 @@ export function drawScene(scene: Scene) {
       target.crouch = Math.max(target.crouch, legs.crouch);
     }
 
+    // DIVE bookkeeping. The server owns the travel (it moves the keeper along
+    // his dive every tick); the client owns leaving the ground, which is the
+    // half of it you can actually see.
+    const diveT_ = pl.diveTicks ?? 0;
+    if (diveT_ > 0 && rig.prevDive === 0) {
+      rig.diveStart = now;
+      const dvx = toThree(flip, pl.diveDirX ?? 0, pl.diveDirY ?? 0, 0);
+      rig.diveDir = dvx.x >= 0 ? 1 : -1;
+    }
+    rig.prevDive = diveT_;
+    let diveK = rig.diveStart >= 0 ? (now - rig.diveStart) / KEEPER_DIVE_MS : -1;
+    if (diveK > 1) {
+      rig.diveStart = -1;
+      diveK = -1;
+    }
+
     // slide bookkeeping: a fresh tackle starts the lunge timeline. The server
     // drives the body along its slide direction, so the heading comes from
     // where the player is actually travelling.
@@ -3769,7 +3820,20 @@ export function drawScene(scene: Scene) {
       target = slideRollPose(now, rig.runSeed, Math.max(0, 1 - (slideT - slideEndT) / 0.4));
       rate = 12;
     }
+    if (diveK >= 0) {
+      target = keeperDivePose(diveK, rig.diveDir);
+      rate = 30; // a dive is explosive; it does not ease into the shape
+    }
     applyPose(rig, target, rate, dt, rig.yaw, now);
+    // OFF THE GROUND. Without this he plays a dive animation while sliding
+    // along the turf on his feet, which reads as a bug rather than a save.
+    if (diveK >= 0) {
+      const air = Math.sin(clamp01(diveK) * Math.PI);
+      rig.root.position.y = air * 1.5;
+      rig.root.rotateZ(-rig.diveDir * air * 1.15);
+    } else {
+      rig.root.position.y = 0;
+    }
 
     // slide root motion: turn along the lunge, go down on the hip, skid, then
     // pick yourself up. The server owns the travel (it moves the player every

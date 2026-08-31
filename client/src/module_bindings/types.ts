@@ -236,6 +236,9 @@ export const Player = __t.object("Player", {
   velY: __t.f32(),
   cards: __t.u8(),
   sentOff: __t.bool(),
+  diveTicks: __t.u8(),
+  diveDirX: __t.f32(),
+  diveDirY: __t.f32(),
 });
 export type Player = __Infer<typeof Player>;
 

@@ -226,6 +226,15 @@ const KEEPER_SPEED = 15; // a keeper is not faster than an outfielder
 const KEEPER_LINE = 3.0; // how far off the goal line it holds (~1 m)
 const KEEPER_MAX_X = GOAL_HALF_W + 1.5; // never camp outside your own post
 const KEEPER_RANGE_Y = BOX_DEPTH; // never strays past the box
+// THE DIVE. Committing to one is the keeper's version of a slide: it beats
+// walking pace and extends his reach, and it is spent whether or not he gets
+// there. Without it a shot inside the post is unreachable and he just stands
+// watching it go in, which is the one thing a keeper must never look like.
+const DIVE_TICKS = ticks(0.55);
+const DIVE_SPEED = 36;
+const DIVE_REACH = 1.8; // multiplies KEEPER_CLEAR_RADIUS while airborne
+// How far off his standing reach the ball has to be before diving is worth it.
+const DIVE_TRIGGER = 2.2;
 // What the keeper can actually get a glove to. Arm reach plus a step is ~4.2,
 // but the keeper's predicted crossing point is EXACT (a ball in free flight
 // crosses at x + vx*t regardless of when you compute it), so at that radius
@@ -528,6 +537,14 @@ const Player = table(
     // offending side genuinely plays the rest of the match a man down.
     cards: t.u8().default(0),
     sentOff: t.bool().default(false),
+    // NOTE: appended — THE DIVE. A keeper who only ever walks along his line
+    // cannot reach a shot struck into the corner, and never looks like he
+    // tried. While diveTicks is running he travels along diveDirX/Y far
+    // faster than he can walk, reaches further, and can take a ball out of
+    // the air — and the client draws him leaving the ground.
+    diveTicks: t.u8().default(0),
+    diveDirX: t.f32().default(0),
+    diveDirY: t.f32().default(0),
   }
 );
 
@@ -1237,6 +1254,9 @@ function insertKeeper(ctx: Ctx, lobbyId: bigint, match: MatchRow, side: number) 
     velY: 0, // spawned with this match, deleted with it
     cards: 0,
     sentOff: false,
+    diveTicks: 0,
+    diveDirX: 0,
+    diveDirY: 0,
   };
   if (ctx.db.player.identity.find(identity)) ctx.db.player.identity.update(row);
   else ctx.db.player.insert(row);
@@ -1285,6 +1305,9 @@ function insertFiller(ctx: Ctx, lobbyId: bigint, match: MatchRow, side: number, 
     velY: 0,
     cards: 0,
     sentOff: false,
+    diveTicks: 0,
+    diveDirX: 0,
+    diveDirY: 0,
   };
   if (ctx.db.player.identity.find(identity)) ctx.db.player.identity.update(row);
   else ctx.db.player.insert(row);
@@ -2531,6 +2554,9 @@ function insertBot(ctx: Ctx, lobbyId: bigint, index: number, side: number): Iden
     velY: 0,
     cards: 0,
     sentOff: false,
+    diveTicks: 0,
+    diveDirX: 0,
+    diveDirY: 0,
   };
   if (ctx.db.player.identity.find(identity)) ctx.db.player.identity.update(row);
   else ctx.db.player.insert(row);
@@ -2664,6 +2690,9 @@ export const onConnect = spacetimedb.clientConnected(ctx => {
       velY: 0,
       cards: 0,
       sentOff: false,
+      diveTicks: 0,
+      diveDirX: 0,
+      diveDirY: 0,
     });
     return;
   }
@@ -3433,6 +3462,31 @@ function pickPassTarget(
   return best;
 }
 
+/**
+ * Where to actually aim a pass at a moving team-mate: AHEAD of him, by how
+ * far he will travel while the ball is in flight.
+ *
+ * pickPassTarget only chooses WHO. Aiming at where he stands puts the ball
+ * behind a man who is running, which is the difference between a pass he can
+ * take in his stride and one he has to check back for — and it is why passing
+ * felt like it was never played into anyone's lane. The lead is capped so a
+ * sprinting team-mate does not drag the ball into a channel nobody can reach.
+ */
+function leadTarget(
+  from: BallRow, target: PlayerRow, ballSpeed: number
+): { x: number; y: number } {
+  const d = Math.hypot(target.x - from.x, target.y - from.y);
+  const flight = clamp(d / Math.max(ballSpeed, 1), 0, 1.1);
+  const runSpeed =
+    PLAYER_SPEED * charStat(target.characterId).speed * (target.sprinting ? SPRINT_MUL : 1);
+  const lx = clamp(target.velX * runSpeed * flight, -14, 14);
+  const ly = clamp(target.velY * runSpeed * flight, -14, 14);
+  return {
+    x: clamp(target.x + lx, -(PITCH_HALF_WID - 2), PITCH_HALF_WID - 2),
+    y: clamp(target.y + ly, -(PITCH_HALF_LEN - 2), PITCH_HALF_LEN - 2),
+  };
+}
+
 function sidesOf(ctx: Ctx, me: PlayerRow, body: PlayerRow) {
   const all = matchPlayers(ctx, me.matchId);
   return {
@@ -3559,12 +3613,13 @@ export const action = spacetimedb.reducer({ button: t.u8() }, (ctx, { button }) 
     const target = pickPassTarget(
       body, mates, foes, stickX, stickY, lob ? PITCH_HALF_LEN : AI_PASS_MAX
     );
+    const aim = target ? leadTarget(ball, target, lob ? 42 : 55) : null;
     executeKick(
       ctx, match, ball, body,
       lob ? KICK_CHIP : KICK_NORMAL,
       lob ? LOB_POWER : PASS_POWER,
-      target ? target.x - ball.x : stickX || 0,
-      target ? target.y - ball.y : stickY || atk
+      aim ? aim.x - ball.x : stickX || 0,
+      aim ? aim.y - ball.y : stickY || atk
     );
     return;
   }
@@ -3734,10 +3789,11 @@ function botPlay(
     const pressured = nearestFoe < 7;
     if (best && (pressured || bestScore > 14)) {
       const d = Math.hypot(best.x - bot.x, best.y - bot.y);
-      const lead = 3 * atk; // lay it ahead of them, not at their feet
+      // lead it into his run, rather than the old fixed nudge upfield
+      const aim = leadTarget(ball, best, 55);
       executeKick(
         ctx, match, ball, bot, KICK_NORMAL, clamp(d / AI_PASS_MAX + 0.25, 0.25, 0.85),
-        best.x - ball.x, best.y + lead - ball.y, lvl.shootErr * 0.7
+        aim.x - ball.x, aim.y - ball.y, lvl.shootErr * 0.7
       );
       return;
     }
@@ -4166,9 +4222,13 @@ function keeperPlay(
     ball.fromKick &&
     ball.lastTouchSide === keeper.side &&
     !sameId(ball.lastTouchId, keeper.identity);
+  // A DIVING keeper reaches further and can take it out of the air — that is
+  // the entire point of leaving your feet.
+  const airborne = keeper.diveTicks > 0;
+  const reachNow = KEEPER_CLEAR_RADIUS * lvl.reach * (airborne ? DIVE_REACH : 1);
   if (
     ball.active && !justReleased && !ourRestart && !backPass &&
-    dist < KEEPER_CLEAR_RADIUS * lvl.reach && ball.z < 7 &&
+    dist < reachNow && ball.z < (airborne ? GOAL_HEIGHT : 7) &&
     mayTouch(match, keeper.side)
   ) {
     if (inOwnBox) {
@@ -4236,11 +4296,33 @@ function keeperPlay(
   ) {
     targetY = gs * (PITCH_HALF_LEN - Math.min(KEEPER_RANGE_Y - 1, Math.abs(gs * PITCH_HALF_LEN - ball.y) * 0.5 + KEEPER_LINE));
   }
-  const speed = KEEPER_SPEED * lvl.speed * (incoming ? 1.7 : 1);
-  const dx = targetX - keeper.x;
-  const dy = targetY - keeper.y;
+  // COMMIT TO A DIVE. A shot heading for a spot he cannot walk to is the
+  // moment a keeper leaves his feet. It is spent whether or not he reaches
+  // it — which is what makes a well-placed shot a goal and a dive a save,
+  // rather than the keeper gliding onto everything at walking pace.
+  let diveTicks = keeper.diveTicks;
+  let diveDirX = keeper.diveDirX;
+  let diveDirY = keeper.diveDirY;
+  if (diveTicks === 0 && incoming) {
+    const reach = targetX - keeper.x;
+    const drop = targetY - keeper.y;
+    const gap = Math.hypot(reach, drop);
+    if (gap > DIVE_TRIGGER) {
+      diveTicks = DIVE_TICKS;
+      diveDirX = reach / gap;
+      diveDirY = drop / gap;
+    }
+  }
+  const diving = diveTicks > 0;
+  if (diving) diveTicks -= 1;
+  const speed = diving
+    ? DIVE_SPEED * lvl.speed
+    : KEEPER_SPEED * lvl.speed * (incoming ? 1.7 : 1);
+  const dx = diving ? diveDirX : targetX - keeper.x;
+  const dy = diving ? diveDirY : targetY - keeper.y;
   const len = Math.hypot(dx, dy);
-  const step = Math.min(len, speed * DT);
+  // mid-dive he is committed: he travels his full step, he does not arrive
+  const step = diving ? speed * DT : Math.min(len, speed * DT);
   const nx = len > 0.01 ? keeper.x + (dx / len) * step : keeper.x;
   const ny = len > 0.01 ? keeper.y + (dy / len) * step : keeper.y;
   // PUBLISH A VELOCITY. keeperPlay moves the keeper by writing x/y directly,
@@ -4260,6 +4342,9 @@ function keeperPlay(
       : clamp(ny, -(PITCH_HALF_LEN - 0.5), -(PITCH_HALF_LEN - KEEPER_RANGE_Y)),
     velX: len > 0.01 ? ((dx / len) * moved) / vScale : 0,
     velY: len > 0.01 ? ((dy / len) * moved) / vScale : 0,
+    diveTicks,
+    diveDirX,
+    diveDirY,
     // expose intent so the client can lean/dive the model
     dirX: Math.abs(dx) > 0.7 ? Math.sign(dx) : 0,
     dirY: Math.abs(dy) > 0.7 ? Math.sign(dy) : 0,

@@ -46,4 +46,7 @@ export default __t.row({
   velY: __t.f32().name("vel_y"),
   cards: __t.u8(),
   sentOff: __t.bool().name("sent_off"),
+  diveTicks: __t.u8().name("dive_ticks"),
+  diveDirX: __t.f32().name("dive_dir_x"),
+  diveDirY: __t.f32().name("dive_dir_y"),
 });
