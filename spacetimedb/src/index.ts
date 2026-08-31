@@ -3827,6 +3827,40 @@ function botPlay(
     return;
   }
 
+  // ---- TAKE THE RESTART ----
+  // A dead ball is not owned by anyone, so the on-ball branch above can never
+  // fire for a set piece — the taker has to be told to play it. Without this
+  // an AI side simply stood over its own throw-in for the full four seconds
+  // and let the window expire, which is the "throw-ins do not work" you get
+  // whenever the restart is not yours.
+  if (
+    match.graceTicks > 0 && match.restartSide === bot.side &&
+    Math.hypot(ball.x - bot.x, ball.y - bot.y) < KICK_RANGE &&
+    match.phase === PHASE_LIVE
+  ) {
+    const taker = takerOf(mates, bot, match.restartX, match.restartY);
+    if (sameId(taker.identity, bot.identity)) {
+      const up = attackSign(bot.side);
+      const kind = match.restartKind;
+      const range = kind === RK_CORNER ? PITCH_HALF_LEN : PITCH_HALF_LEN * 0.7;
+      const pick = pickPassTarget(bot, mates, foes, 0, up, range);
+      const aim = pick ? leadTarget(ball, pick, 50) : null;
+      // a corner with nobody picked out is swung into the goalmouth
+      const fbX = kind === RK_CORNER ? -ball.x : 0;
+      const fbY = kind === RK_CORNER ? up * PITCH_HALF_LEN - ball.y : up * 18;
+      executeKick(
+        ctx, match, ball, bot,
+        kind === RK_CORNER ? KICK_CHIP : KICK_NORMAL,
+        kind === RK_CORNER ? LOB_POWER : PASS_POWER,
+        aim ? aim.x - ball.x : fbX,
+        aim ? aim.y - ball.y : fbY,
+        lvl.shootErr * 0.6
+      );
+      clearGraceOnTouch(ctx, match, bot.side);
+      return;
+    }
+  }
+
   // ---- OFF THE BALL ----
   // RECEIVE. A pass is running to us: go and MEET it. Nothing did this before
   // — the intended receiver stood on his formation anchor while the ball
@@ -5165,8 +5199,23 @@ export const game_tick = spacetimedb.reducer(
       (protectedSide < 0 || p.side === protectedSide) &&
       !(lockedOut !== null && sameId(p.identity, lockedOut));
 
+    // A BALL WAITING TO BE RESTARTED IS DEAD. Nobody owns it, nobody dribbles
+    // it off the spot — it sits there until someone TAKES the throw-in, the
+    // free kick, the corner. This is what makes a set piece a set piece.
+    //
+    // Without it, placing the taker on the ball (which is what a taker
+    // standing over it means) handed him possession on the very first tick,
+    // and the dribble branch's clearGraceOnTouch then cancelled the restart
+    // immediately. The whistle went, the banner said FREE KICK, and half a
+    // second later you were just a man with the ball in open play — no
+    // throw-in mode, no free-kick mode, ever. Measured on a live match:
+    // FREE KICK awarded, then "SPACE PASS · K LOB · L SHOOT" one tick later.
+    const restartHeld = match.graceTicks > 0;
     let owner: PlayerRow | null = null;
-    if (ball.hasOwner) {
+    if (restartHeld) {
+      // hold it still on the spot so it cannot roll away before it is taken
+      ball = { ...ball, vx: 0, vy: 0, vz: 0, hasOwner: false, ownerId: ZERO_ID };
+    } else if (ball.hasOwner) {
       const prev = fresh.find(p => sameId(p.identity, ball!.ownerId));
       if (
         prev && eligible(prev) &&
@@ -5176,7 +5225,7 @@ export const game_tick = spacetimedb.reducer(
         owner = prev;
       }
     }
-    if (!owner && ball.z < CONTROL_MAX_Z) {
+    if (!owner && !restartHeld && ball.z < CONTROL_MAX_Z) {
       let bestD = Infinity;
       for (const p of fresh) {
         if (!eligible(p)) continue;
