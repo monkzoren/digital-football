@@ -41,7 +41,7 @@ const OT_TICKS = OT_SECONDS * TICK_HZ;
 // budget (CUT_DELAY + WINDOW/SPEED + TAIL ~= 5.9 s) or the replay cuts away
 // before the ball crosses the line — a goal replay that never shows the goal.
 const GOAL_PAUSE = ticks(7.5);
-const RESTART_PAUSE = ticks(1.4); // kick-in / corner / goal kick placement
+const RESTART_PAUSE = ticks(1.4); // throw-in / corner / goal kick placement
 const HALFTIME_PAUSE = ticks(6);
 const COUNTDOWN_TICKS = ticks(3); // 3-2-1 before the first kickoff
 const RESTART_GRACE = ticks(1.6); // only the awarded side may play the ball
@@ -53,7 +53,7 @@ const KICKOFF_AUTO = ticks(4);
 // Restart kinds — what the pending pause resolves into.
 const RK_NONE = 0;
 const RK_KICKOFF = 1; // after a goal (kickoffSide concedes) and at half starts
-const RK_KICKIN = 2; // ball over a sideline
+const RK_THROWIN = 2; // ball over a touchline — taken with the hands
 const RK_GOALKICK = 3; // over the goal line off an attacker
 const RK_CORNER = 4; // over the goal line off a defender
 const RK_HALFTIME = 5;
@@ -66,12 +66,14 @@ const RK_DROP = 7; // neutral drop after a reconnect halt
 // Match pace. Deliberately below a real jog: the arcade read of "slow the
 // game down" is about how much time you have on the ball, and at 17 the
 // whole pitch went past faster than anyone could think.
-const PLAYER_SPEED = 13.5;
+const PLAYER_SPEED = 15.5;
 // How quickly a body reaches the speed it is asking for, and how quickly it
-// gives it up. Fast enough to feel tight, slow enough that nothing snaps:
-// ~0.18 s to full pace, ~0.12 s to a stop.
-const ACCEL_RATE = 9.0;
-const BRAKE_RATE = 13.0;
+// gives it up. This is the tightness dial, and it pulls against smoothness:
+// at 9/13 the ramp was long enough to read as input lag. ~0.09 s to full
+// pace and ~0.06 s to a stop keeps the easing that killed the twitchiness
+// while putting the response back.
+const ACCEL_RATE = 18.0;
+const BRAKE_RATE = 26.0;
 const SPRINT_MUL = 1.6; // the burst still matters, it just starts lower
 const DRIBBLE_MUL = 0.85; // 4.4 m/s — running with the ball at pace
 const STAMINA_MAX = 1000;
@@ -2089,6 +2091,12 @@ function awardRestart(
   msg: string
 ) {
   ctx.db.ball.matchId.update({ ...ball, active: false, hasOwner: false });
+  // no keeper is still holding a ball that has gone out of play
+  for (const k of matchPlayers(ctx, match.id)) {
+    if (k.role === ROLE_KEEPER && k.holdTicks > 0) {
+      ctx.db.player.identity.update({ ...k, holdTicks: 0 });
+    }
+  }
   ctx.db.match.id.update({
     ...match,
     phase: PHASE_PAUSE,
@@ -3396,6 +3404,9 @@ function botPlay(
   foes: PlayerRow[],
   isPresser: boolean,
   possSide: number,
+  // the side whose KEEPER is holding the ball, or -1. Everyone must clear
+  // that penalty area — nobody stands over a keeper waiting for a drop.
+  heldBySide: number,
   seed: number
 ): void {
   const lvl = BOT_LEVELS[clamp(lobby?.botLevel ?? 1, 0, BOT_LEVELS.length - 1)];
@@ -3471,8 +3482,9 @@ function botPlay(
   // ---- OFF THE BALL ----
   let tx: number;
   let ty: number;
-  if (isPresser) {
-    // The one player allowed to go to the ball.
+  if (isPresser && heldBySide < 0) {
+    // The one player allowed to go to the ball — but not while it is in a
+    // keeper's hands, when there is nothing to press.
     tx = ball.x + ball.vx * 0.25 + noise(1) * lvl.reactErr;
     ty = ball.y + ball.vy * 0.25 + noise(2) * lvl.reactErr;
     const dist = Math.hypot(ball.x - bot.x, ball.y - bot.y);
@@ -3523,7 +3535,24 @@ function botPlay(
       ty = ball.y + ((ty - ball.y) / bd) * AI_PRESS_BUBBLE;
     }
   }
-  steerBot(ctx, bot, tx, ty, false);
+  // CLEAR THE AREA. While a keeper has the ball in its hands the penalty box
+  // belongs to it: attackers may not stand over it waiting for a drop, and
+  // its own defenders should be showing for the throw, not blocking it.
+  let clearingBox = false;
+  if (heldBySide >= 0) {
+    const gl = sideSign(heldBySide) * PITCH_HALF_LEN;
+    const inBox =
+      Math.abs(bot.x) < BOX_HALF_W + 2 && Math.abs(bot.y - gl) < BOX_DEPTH + 2;
+    if (inBox) {
+      // Out to the edge of the area, keeping your width — and at a RUN. The
+      // hold is only about a second, so a walking retreat leaves half the
+      // players still standing in the box when the keeper releases.
+      ty = gl - sideSign(heldBySide) * (BOX_DEPTH + 4);
+      tx = clamp(bot.x, -(PITCH_HALF_WID - 3), PITCH_HALF_WID - 3);
+      clearingBox = true;
+    }
+  }
+  steerBot(ctx, bot, tx, ty, clearingBox);
 }
 
 // Point a bot at a spot with an ANALOG heading. Also writes dirX/dirY, which
@@ -3659,8 +3688,13 @@ function keeperPlay(
   // the lock expired: holds came out at 3-5s instead of one, and the ball
   // spent 89% of the match in a pair of gloves.
   const justReleased = sameId(ball.lastTouchId, keeper.identity);
+  // Nor may it gather a ball placed for its OWN side's restart. A goal kick
+  // is spotted inside the area with the keeper standing over it, so without
+  // this the keeper scoops up the restart the player was handed and the goal
+  // kick is never theirs to take.
+  const ourRestart = match.graceTicks > 0 && match.restartSide === keeper.side;
   if (
-    ball.active && !justReleased &&
+    ball.active && !justReleased && !ourRestart &&
     dist < KEEPER_CLEAR_RADIUS * lvl.reach && ball.z < 7 &&
     mayTouch(match, keeper.side)
   ) {
@@ -3802,10 +3836,10 @@ function resolveOutOfPlay(
   if (Math.abs(ball.x) > PITCH_HALF_WID) {
     const side = 1 - ball.lastTouchSide;
     awardRestart(
-      ctx, match, ball, RK_KICKIN, side,
+      ctx, match, ball, RK_THROWIN, side,
       (ball.x >= 0 ? 1 : -1) * (PITCH_HALF_WID - 0.5),
       clamp(ball.y, -PITCH_HALF_LEN + 2, PITCH_HALF_LEN - 2),
-      `KICK-IN — ${teamName(players, side)}`
+      `THROW-IN — ${teamName(players, side)}`
     );
     return true;
   }
@@ -3961,7 +3995,7 @@ export const game_tick = spacetimedb.reducer(
           ctx.db.match.id.update(next);
           return;
         }
-        case RK_KICKIN:
+        case RK_THROWIN:
         case RK_GOALKICK:
         case RK_CORNER:
         case RK_DROP: {
@@ -3972,7 +4006,8 @@ export const game_tick = spacetimedb.reducer(
               active: true,
               x: match.restartX,
               y: match.restartY,
-              z: 0,
+              // a throw-in starts in the taker's hands, above their head
+              z: match.restartKind === RK_THROWIN ? 3.4 : 0,
               vx: 0, vy: 0, vz: 0,
               hasOwner: false,
               ownerId: ZERO_ID,
@@ -4101,8 +4136,10 @@ export const game_tick = spacetimedb.reducer(
         const foes = outBySide[1 - cur.side];
         const isPresser =
           (cur.side === 0 ? match.presser0 : match.presser1) === mySlot;
+        const holder = players.find(q => q.role === ROLE_KEEPER && q.holdTicks > 0);
         botPlay(
           ctx, match, lobby, cur, ball, mates, foes, isPresser, possSide,
+          holder ? holder.side : -1,
           // Seeded per body. Outfield teamSlot is unique per side, so no two
           // bots ever draw the same noise and move as one.
           Number(match.id % 100000n) + cur.side * 31 + mySlot * 17

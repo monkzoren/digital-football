@@ -5,7 +5,7 @@ import {
   SPACETIMEDB_URI, DATABASE_NAME, GRAVITY, PLAYER_SPEED, CHAR_SPEED, TICK_HZ,
   PHASE_KICKOFF, PHASE_LIVE, PHASE_PAUSE, PHASE_OVER,
   KICK_NORMAL, KICK_CHIP, KICK_CHARGE_SECS, STAMINA_MAX,
-  RK_NONE, RK_KICKOFF, RK_KICKIN, RK_GOALKICK, RK_CORNER, RK_HALFTIME, RK_OVERTIME, RK_DROP,
+  RK_NONE, RK_KICKOFF, RK_THROWIN, RK_GOALKICK, RK_CORNER, RK_HALFTIME, RK_OVERTIME, RK_DROP,
   HALF_SECONDS, OT_SECONDS, ROLE_KEEPER, SQUAD_SIZE, KEEPER_RIG_SEAT,
   totalXpFor, levelFor, LEVEL_MAX, CLAIM_UNLOCK_SECS,
 } from './config';
@@ -70,7 +70,7 @@ import {
 // Restart kinds, as the banner names them (index = match.restartKind).
 const RESTART_NAMES: Record<number, string> = {
   [RK_KICKOFF]: 'KICK OFF',
-  [RK_KICKIN]: 'KICK-IN',
+  [RK_THROWIN]: 'THROW-IN',
   [RK_GOALKICK]: 'GOAL KICK',
   [RK_CORNER]: 'CORNER',
   [RK_HALFTIME]: 'HALF-TIME',
@@ -2236,7 +2236,7 @@ function crowdFrame(match: any, ball: any) {
       } else {
         const msg: string = match.pointMsg ?? '';
         if (msg.startsWith('HALF-TIME')) playWhistle();
-        else crowdMurmur(0.4); // a kick-in, a corner, a goal kick
+        else crowdMurmur(0.4); // a throw-in, a corner, a goal kick
       }
     }
     crowdPrevPhase = match.phase;

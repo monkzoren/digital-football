@@ -37,7 +37,7 @@ export const BOX_HALF_W = 20;
 export const CENTER_CIRCLE_R = 10;
 export const BALL_RADIUS = 0.45;
 export const GRAVITY = -38;
-export const PLAYER_SPEED = 13.5;
+export const PLAYER_SPEED = 15.5;
 // Movement ramps rather than snapping — mirrors ACCEL_RATE/BRAKE_RATE. The
 // client dead-reckons at the CURRENT velocity (player.velX/velY), so it does
 // not need the rates, only the top speed they ease toward.
@@ -68,7 +68,7 @@ export const PHASE_OVER = 4;
 // Restart kinds (match.restartKind) — mirrors RK_*.
 export const RK_NONE = 0;
 export const RK_KICKOFF = 1;
-export const RK_KICKIN = 2;
+export const RK_THROWIN = 2; // taken with the hands
 export const RK_GOALKICK = 3;
 export const RK_CORNER = 4;
 export const RK_HALFTIME = 5;
