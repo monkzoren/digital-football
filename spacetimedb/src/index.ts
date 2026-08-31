@@ -230,9 +230,15 @@ const KEEPER_RANGE_Y = BOX_DEPTH; // never strays past the box
 // walking pace and extends his reach, and it is spent whether or not he gets
 // there. Without it a shot inside the post is unreachable and he just stands
 // watching it go in, which is the one thing a keeper must never look like.
+// These have to stay HONEST about the goal they are defending. The goal is
+// GOAL_HALF_W = 6.5 either side of centre, so a dive that reaches 1.8x the
+// standing radius covers 6.1 of it and a 36-unit-per-second dive crosses the
+// whole mouth in half a second — which would hand back exactly the
+// unbeatable keeper the err fix above was written to remove. A dive is a
+// commitment that beats walking, not a second pair of hands.
 const DIVE_TICKS = ticks(0.55);
-const DIVE_SPEED = 36;
-const DIVE_REACH = 1.8; // multiplies KEEPER_CLEAR_RADIUS while airborne
+const DIVE_SPEED = 24;
+const DIVE_REACH = 1.45; // multiplies KEEPER_CLEAR_RADIUS while airborne (4.9)
 // How far off his standing reach the ball has to be before diving is worth it.
 const DIVE_TRIGGER = 2.2;
 // What the keeper can actually get a glove to. Arm reach plus a step is ~4.2,
