@@ -78,7 +78,10 @@ const SPRINT_DRAIN = 7; // per tick while sprinting and moving
 const STAMINA_REGEN = 3; // per tick otherwise
 
 const CONTROL_RADIUS = 2.8; // ball inside this sticks to your feet (~0.85 m)
-const CONTROL_KEEP_RADIUS = 3.6; // an owner keeps the ball out to here
+// An owner keeps the ball out to here. It has to be comfortably beyond the
+// knock distance: chasing your own touch IS dribbling, and losing possession
+// the instant the ball left your boot would make the touch cycle unplayable.
+const CONTROL_KEEP_RADIUS = 5.4;
 // Faster balls can only be trapped, not owned. This sat BELOW the bottom of
 // the real passing range, so every pass firm enough to beat a defender was
 // untakeable by construction.
@@ -86,6 +89,18 @@ const CONTROL_MAX_SPEED = 46;
 const CONTROL_MAX_Z = 2.5; // thigh height, so a dropping ball can be taken
 const TRAP_DAMP = 0.3; // a trap kills most of the ball's pace
 const TOUCH_AHEAD = 3.2; // ~1 m knock in front of the runner
+// Dribbling is a cycle of TOUCHES, not a magnet. You knock the ball ahead,
+// it rolls free for a couple of strides, you catch up to it and knock it
+// again. TOUCH_TRIGGER is how close you have to get before the next touch
+// goes in — reaching it is what sets the rhythm, so the cadence follows your
+// speed for free — and TOUCH_KNOCK is how much faster than you the ball
+// leaves your boot. Between touches the ball is genuinely loose: it carries
+// its own velocity, drag slows it, and a defender can get to it. That gap is
+// the whole reason a dribble is a risk rather than a guarantee.
+const TOUCH_TRIGGER = 1.9;
+const TOUCH_KNOCK = 9.0;
+// Standing still, the ball settles at your feet instead of rolling away.
+const SETTLE_DAMP = 0.55;
 const CONTEST_CHANCE = 0.05; // per tick, standing challenge inside the radius
 
 // How long a struck ball is out of its kicker's reach (see Ball.lockTicks).
@@ -4792,29 +4807,68 @@ export const game_tick = spacetimedb.reducer(
         };
         match = clearGraceOnTouch(ctx, match, contester.side);
       } else {
-        // Dribble carry: the ball rides a touch ahead of the runner.
-        const moving = owner.dirX !== 0 || owner.dirY !== 0;
+        // DRIBBLE. The ball used to be pinned to a point in front of the
+        // runner every tick with its velocity zeroed — a magnet on a string.
+        // Nothing about that is football: the ball never rolled, it could
+        // never be nicked between touches, and because it had no velocity the
+        // client could not interpolate it either, so a dribble strobed.
+        //
+        // Now the ball is TOUCHED. When the runner catches up to it, he knocks
+        // it ahead and it rolls away under its own momentum until he reaches
+        // it again. Everything else — drag, the contest above, out of play —
+        // treats it as the loose ball it now genuinely is.
+        const moving = owner.mvX !== 0 || owner.mvY !== 0;
         let fx: number;
         let fy: number;
         if (moving) {
-          const len = Math.hypot(owner.dirX, owner.dirY) || 1;
-          fx = owner.dirX / len;
-          fy = owner.dirY / len;
+          const len = Math.hypot(owner.mvX, owner.mvY) || 1;
+          fx = owner.mvX / len;
+          fy = owner.mvY / len;
         } else {
           fx = 0;
           fy = attackSign(owner.side);
         }
-        const lead = TOUCH_AHEAD + (owner.sprinting && moving ? 3.0 : 0);
-        const txp = owner.x + fx * lead;
-        const typ = owner.y + fy * lead;
+        const dx = ball.x - owner.x;
+        const dy = ball.y - owner.y;
+        const gap = Math.hypot(dx, dy);
+        if (!moving) {
+          // Standing over it: kill the roll so close control is close
+          // control, and nudge it to the near side of the boot.
+          const settleX = owner.x + fx * TOUCH_TRIGGER;
+          const settleY = owner.y + fy * TOUCH_TRIGGER;
+          ball = {
+            ...ball,
+            x: ball.x + (settleX - ball.x) * SETTLE_DAMP,
+            y: ball.y + (settleY - ball.y) * SETTLE_DAMP,
+            z: 0,
+            vx: ball.vx * (1 - SETTLE_DAMP),
+            vy: ball.vy * (1 - SETTLE_DAMP),
+            vz: 0,
+          };
+        } else if (gap < TOUCH_TRIGGER) {
+          // Caught up to it — put the next touch in. The knock goes along the
+          // run, with a small correction so the ball comes back in front of
+          // the boot rather than drifting off a shoulder.
+          const ownSpeed = Math.hypot(owner.velX, owner.velY) * PLAYER_SPEED *
+            charStat(owner.characterId).speed * (owner.sprinting ? SPRINT_MUL : 1);
+          const knock = ownSpeed * DRIBBLE_MUL + TOUCH_KNOCK;
+          const cx = gap > 0.01 ? dx / gap : fx;
+          const cy = gap > 0.01 ? dy / gap : fy;
+          const ax = fx * 0.8 + cx * 0.2;
+          const ay = fy * 0.8 + cy * 0.2;
+          const al = Math.hypot(ax, ay) || 1;
+          ball = {
+            ...ball,
+            vx: (ax / al) * knock,
+            vy: (ay / al) * knock,
+            vz: 0,
+            z: 0,
+          };
+        }
+        // Between touches nothing is written to the ball's position at all —
+        // it is rolling, and the integrator owns it.
         ball = {
           ...ball,
-          x: ball.x + (txp - ball.x) * 0.45,
-          y: ball.y + (typ - ball.y) * 0.45,
-          z: 0,
-          vx: 0,
-          vy: 0,
-          vz: 0,
           hasOwner: true,
           ownerId: owner.identity,
           lastTouchSide: owner.side,
