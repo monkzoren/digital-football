@@ -34,14 +34,13 @@ import {
 } from "spacetimedb";
 
 // Import all reducer arg schemas
+import ActionReducer from "./action_reducer";
 import ClaimWinReducer from "./claim_win_reducer";
 import CreateLobbyReducer from "./create_lobby_reducer";
 import CreatePracticeReducer from "./create_practice_reducer";
 import CreateTournamentReducer from "./create_tournament_reducer";
 import ForfeitReducer from "./forfeit_reducer";
 import JoinLobbyReducer from "./join_lobby_reducer";
-import KickReducer from "./kick_reducer";
-import KickReleaseReducer from "./kick_release_reducer";
 import LeaveLobbyReducer from "./leave_lobby_reducer";
 import PlaceBetReducer from "./place_bet_reducer";
 import RematchReducer from "./rematch_reducer";
@@ -54,7 +53,6 @@ import SetTournamentSettingsReducer from "./set_tournament_settings_reducer";
 import SpectateMatchReducer from "./spectate_match_reducer";
 import StartTournamentReducer from "./start_tournament_reducer";
 import SwitchPlayerReducer from "./switch_player_reducer";
-import TackleReducer from "./tackle_reducer";
 
 // Import all procedure arg schemas
 
@@ -239,14 +237,13 @@ const tablesSchema = __schema({
 
 /** The schema information for all reducers in this module. This is defined the same way as the reducers would have been defined in the server, except the body of the reducer is omitted in code generation. */
 const reducersSchema = __reducers(
+  __reducerSchema("action", ActionReducer),
   __reducerSchema("claim_win", ClaimWinReducer),
   __reducerSchema("create_lobby", CreateLobbyReducer),
   __reducerSchema("create_practice", CreatePracticeReducer),
   __reducerSchema("create_tournament", CreateTournamentReducer),
   __reducerSchema("forfeit", ForfeitReducer),
   __reducerSchema("join_lobby", JoinLobbyReducer),
-  __reducerSchema("kick", KickReducer),
-  __reducerSchema("kick_release", KickReleaseReducer),
   __reducerSchema("leave_lobby", LeaveLobbyReducer),
   __reducerSchema("place_bet", PlaceBetReducer),
   __reducerSchema("rematch", RematchReducer),
@@ -259,7 +256,6 @@ const reducersSchema = __reducers(
   __reducerSchema("spectate_match", SpectateMatchReducer),
   __reducerSchema("start_tournament", StartTournamentReducer),
   __reducerSchema("switch_player", SwitchPlayerReducer),
-  __reducerSchema("tackle", TackleReducer),
 );
 
 /** The schema information for all procedures in this module. This is defined the same way as the procedures would have been defined in the server. */

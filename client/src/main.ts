@@ -4,9 +4,9 @@ import type { Identity } from 'spacetimedb';
 import {
   SPACETIMEDB_URI, DATABASE_NAME, GRAVITY, PLAYER_SPEED, CHAR_SPEED, TICK_HZ,
   PHASE_KICKOFF, PHASE_LIVE, PHASE_PAUSE, PHASE_OVER,
-  KICK_NORMAL, KICK_CHIP, KICK_CHARGE_SECS, STAMINA_MAX,
+  STAMINA_MAX,
   RK_NONE, RK_KICKOFF, RK_THROWIN, RK_GOALKICK, RK_CORNER, RK_HALFTIME, RK_OVERTIME, RK_DROP,
-  HALF_SECONDS, OT_SECONDS, ROLE_KEEPER, SQUAD_SIZE, KEEPER_RIG_SEAT,
+  HALF_SECONDS, OT_SECONDS, ROLE_KEEPER, SQUAD_SIZE, KEEPER_RIG_SEAT, KICK_RANGE,
   totalXpFor, levelFor, LEVEL_MAX, CLAIM_UNLOCK_SECS,
 } from './config';
 import {
@@ -56,7 +56,9 @@ import {
   crowdRoar,
   crowdMurmur,
 } from './audio';
-import { initTouch, touchDir, touchSprint, setTouchVisible, touchAvailable } from './touch';
+import {
+  initTouch, touchDir, touchSprint, setTouchVisible, setTouchActions, touchAvailable,
+} from './touch';
 import {
   getGraphics,
   setGraphics,
@@ -1519,19 +1521,64 @@ const MOVE_KEYS: Record<string, [number, number]> = {
   KeyA: [-1, 0],
   KeyD: [1, 0],
 };
-// KICK is press-to-charge / release-to-strike; CHIP is the same with a lofted
-// kind; SLIDE is a one-shot lunge with nothing to release. SPRINT is a held
-// modifier folded into setInput.
-const KICK_KEYS = new Set(['Space', 'KeyJ']);
-const CHIP_KEYS = new Set(['KeyK', 'ShiftRight']);
-const SLIDE_KEYS = new Set(['KeyL', 'ControlLeft', 'ControlRight']);
+// Three context-sensitive action buttons — the server decides what each one
+// means from the situation (see actionLabels), so there is nothing to hold,
+// charge or release: one press, one action. SPRINT is a held modifier folded
+// into setInput.
+const ACT_KEYS: Record<string, number> = {
+  Space: 0, KeyJ: 0,
+  KeyK: 1,
+  KeyL: 2,
+};
 // Switch to another team-mate. Q and Tab are where football games put it;
 // Tab needs preventDefault or the browser walks focus out of the canvas.
 const SWITCH_KEYS = new Set(['KeyQ', 'Tab']);
 const SPRINT_KEYS = new Set(['ShiftLeft']);
 
-function pressKick(kind: number) {
-  conn.reducers.kick({ kind });
+function doAction(button: number) {
+  conn.reducers.action({ button });
+}
+
+/**
+ * What the three action buttons mean RIGHT NOW.
+ *
+ * Mirrors the situation ladder in the module's `action` reducer — keeper
+ * with the ball in its hands, then a set piece, then possession, then
+ * everything else — because one press does a different thing in each of
+ * them and a button whose meaning you have to guess is no better than no
+ * button at all.
+ */
+type ActionLabels = [string, string, string];
+const ACT_CHASING: ActionLabels = ['TACKLE', 'SLIDE', 'SWITCH'];
+const ACT_ON_BALL: ActionLabels = ['PASS', 'LOB', 'SHOOT'];
+
+function actionLabels(match: any, ball: any, body: any): ActionLabels {
+  if (!match || !ball || !body) return ACT_CHASING;
+  if ((body.role ?? 0) === ROLE_KEEPER && (body.holdTicks ?? 0) > 0)
+    return ['THROW', 'LONG BALL', 'PUT DOWN'];
+  // the restart is only yours to take once you have walked to the ball —
+  // same test the reducer makes, so the labels can't promise a throw-in the
+  // server would refuse
+  const takingRestart =
+    (match.graceTicks ?? 0) > 0 &&
+    match.restartSide === body.side &&
+    Math.hypot(ball.x - body.x, ball.y - body.y) < KICK_RANGE + 2;
+  // A kickoff runs through the server's SET-PIECE branch, where button 2 is a
+  // short ball, not a shot — you are 66 units from goal, so labelling it
+  // SHOOT would promise something the reducer will not do.
+  const atKickoff = match.phase === PHASE_KICKOFF && match.kickoffSide === body.side;
+  if (atKickoff) return ['PASS', 'LOB', 'SHORT'];
+  if (takingRestart) {
+    switch (match.restartKind) {
+      case RK_THROWIN: return ['THROW IN', 'LONG THROW', 'SHORT THROW'];
+      case RK_CORNER: return ['CORNER', 'HIGH CORNER', 'SHORT CORNER'];
+      case RK_GOALKICK: return ['GOAL KICK', 'LONG BALL', 'SHORT'];
+      default: return ['PASS', 'LOB', 'SHORT'];
+    }
+  }
+  if (ball.hasOwner && ball.ownerId.toHexString() === body.identity.toHexString())
+    return ACT_ON_BALL;
+  return ACT_CHASING;
 }
 const EMOTE_KEYS: Record<string, number> = {
   Digit1: 0, Digit2: 1, Digit3: 2, Digit4: 3,
@@ -1579,10 +1626,8 @@ window.addEventListener('gamepadconnected', () => {
   padUsedAt = performance.now();
 });
 
-// Ⓐ KICK · Ⓑ CHIP · Ⓧ SLIDE · right trigger SPRINT.
-const GP_KICK = 0;
-const GP_CHIP = 1;
-const GP_SLIDE = 2;
+// Ⓐ/Ⓑ/Ⓧ are action buttons 0/1/2 · right trigger SPRINT.
+const GP_ACT = [0, 1, 2];
 const GP_SPRINT = 7;
 const GP_SWITCH = 4; // left bumper, where every football game puts it
 const gpPrev: Record<number, boolean> = {};
@@ -1601,14 +1646,11 @@ function pollGamepad(): [number, number] | null {
     const was = gpPrev[i] ?? false;
     gpPrev[i] = down;
     if (down) padUsedAt = performance.now();
-    return { down, pressed: down && !was, released: !down && was };
+    return { down, pressed: down && !was };
   };
-  for (const [btn, kind] of [[GP_KICK, KICK_NORMAL], [GP_CHIP, KICK_CHIP]] as const) {
-    const e = edge(btn);
-    if (e.pressed) pressKick(kind);
-    if (e.released) conn.reducers.kickRelease({});
-  }
-  if (edge(GP_SLIDE).pressed) conn.reducers.tackle({});
+  GP_ACT.forEach((btn, button) => {
+    if (edge(btn).pressed) doAction(button);
+  });
   if (edge(GP_SWITCH).pressed) conn.reducers.switchPlayer({});
   padSprint = edge(GP_SPRINT).down || (gp.buttons[GP_SPRINT]?.value ?? 0) > 0.4;
   const ax = gp.axes[0] ?? 0;
@@ -1882,14 +1924,9 @@ function trackFps(now: number) {
 }
 
 initTouch({
-  kick: kind => {
+  action: button => {
     unlockAudio();
-    pressKick(kind);
-  },
-  kickRelease: () => conn.reducers.kickRelease({}),
-  tackle: () => {
-    unlockAudio();
-    conn.reducers.tackle({});
+    doAction(button);
   },
   switchPlayer: () => {
     unlockAudio();
@@ -1909,15 +1946,9 @@ window.addEventListener('keydown', e => {
   if (MOVE_KEYS[e.code]) {
     e.preventDefault();
     pressed.add(e.code);
-  } else if (KICK_KEYS.has(e.code)) {
+  } else if (e.code in ACT_KEYS) {
     e.preventDefault();
-    if (!e.repeat) pressKick(KICK_NORMAL);
-  } else if (CHIP_KEYS.has(e.code)) {
-    e.preventDefault();
-    if (!e.repeat) pressKick(KICK_CHIP);
-  } else if (SLIDE_KEYS.has(e.code)) {
-    e.preventDefault();
-    if (!e.repeat) conn.reducers.tackle({});
+    if (!e.repeat) doAction(ACT_KEYS[e.code]);
   } else if (SWITCH_KEYS.has(e.code)) {
     e.preventDefault();
     // repeats DO fire: holding switch cycles through your team-mates, which
@@ -1982,9 +2013,6 @@ window.addEventListener('keydown', e => {
 });
 window.addEventListener('keyup', e => {
   if (MOVE_KEYS[e.code] || SPRINT_KEYS.has(e.code)) pressed.delete(e.code);
-  else if (KICK_KEYS.has(e.code) || CHIP_KEYS.has(e.code)) {
-    conn.reducers.kickRelease({});
-  }
 });
 
 /** Is a sprint modifier down on any device? */
@@ -2111,9 +2139,6 @@ function sideLabel(players: any[], side: number): string {
   );
 }
 
-// Full kick charge, in ticks — mirrors KICK_CHARGE_TICKS in the module.
-const KICK_CHARGE_TICKS = KICK_CHARGE_SECS * TICK_HZ;
-
 function updatePlates(match: any, players: any[], mySide: number) {
   for (const side of [0, 1] as const) {
     const plate = plates[side];
@@ -2129,7 +2154,7 @@ function updatePlates(match: any, players: any[], mySide: number) {
       match.phase === PHASE_KICKOFF && match.kickoffSide === side ? '● KICK OFF' : '';
     plate.querySelector('.ppoints')!.textContent = '';
 
-    // Stamina under the nameplate; the kick-power charge draws over it.
+    // Stamina under the nameplate.
     const fill = plate.querySelector('.pmeter-fill') as HTMLElement;
     const mine = side === mySide;
     const stamina = mine ? (player?.stamina ?? STAMINA_MAX) / STAMINA_MAX : 0;
@@ -4163,7 +4188,11 @@ function frame() {
       if (tag && tag.textContent !== name) tag.textContent = name;
     }
   }
-  // the hint line follows whichever device the player actually used last
+  // The three buttons are context-sensitive, so the hints have to be too:
+  // both the thumb buttons and the help line say what a press does here and
+  // now, and follow whichever device the player actually used last.
+  const acts = actionLabels(viewMatch, ball, focusBody);
+  setTouchActions(acts);
   help.textContent = spectating
     ? usingPad()
       ? ''
@@ -4172,10 +4201,10 @@ function frame() {
           'B BRACKET · ENTER CHAT · 1-8 EMOTES'
         : 'ENTER CHAT · 1-8 EMOTES'
     : usingPad()
-      ? 'STICK MOVE · Ⓐ KICK (HOLD) · Ⓑ CHIP · Ⓧ SLIDE · LB SWITCH · RT SPRINT'
+      ? `STICK MOVE · Ⓐ ${acts[0]} · Ⓑ ${acts[1]} · Ⓧ ${acts[2]} · LB SWITCH · RT SPRINT`
       : touchAvailable
-        ? 'DRAG LEFT TO MOVE · HOLD KICK FOR POWER · ⚡ SPRINT'
-        : 'WASD MOVE · SPACE KICK (HOLD) · K CHIP · L SLIDE · Q SWITCH · SHIFT SPRINT';
+        ? `DRAG LEFT TO MOVE · ${acts.join(' · ')} · ⚡ SPRINT`
+        : `WASD MOVE · SPACE ${acts[0]} · K ${acts[1]} · L ${acts[2]} · Q SWITCH · SHIFT SPRINT`;
   if (spectating) {
     // no standing banner — the nameplates and the bug carry the context, so
     // mid-pitch text stays reserved for goals and restarts

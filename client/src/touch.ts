@@ -1,5 +1,7 @@
-// Touch controls: a floating 8-way stick on the left, KICK/CHIP/SLIDE on the
-// right, plus a SPRINT toggle.
+// Touch controls: a floating 8-way stick on the left, the three
+// context-sensitive action buttons on the right, plus a SPRINT toggle. The
+// buttons carry no fixed verb — main.ts renames them every frame with what a
+// press does in the current situation (see setTouchActions).
 //
 // The stick is *floating* — it appears wherever the thumb lands inside the
 // left zone rather than at a fixed spot, which is what makes it playable
@@ -8,9 +10,7 @@
 // (see sendDir in main.ts); analog magnitude would be thrown away.
 
 type Handlers = {
-  kick: (kind: number) => void;
-  kickRelease: () => void;
-  tackle: () => void;
+  action: (button: number) => void;
   switchPlayer: () => void;
   chat: () => void;
 };
@@ -125,18 +125,17 @@ function initStick() {
   }
 }
 
-// Each action button tracks its own pointer id so a second finger on the
-// other button can't cancel the first one's hold — hold length is what the
-// server reads as kick power.
+// Every action fires on the press — there is no hold to time — but each
+// button still tracks its own pointer id so a second thumb elsewhere can't
+// leave this one stuck in its pressed state.
 const releasers: Array<() => void> = [];
 
-function initButton(el: HTMLElement, onDown: () => void, onUp: () => void) {
+function initButton(el: HTMLElement, onDown: () => void) {
   let held: number | null = null;
   const release = () => {
     if (held === null) return;
     held = null;
     el.classList.remove('pressed');
-    onUp();
   };
   releasers.push(release);
   el.addEventListener('pointerdown', e => {
@@ -156,8 +155,19 @@ function initButton(el: HTMLElement, onDown: () => void, onUp: () => void) {
   }
 }
 
+// The three action buttons, in button order.
+let actionEls: HTMLElement[] = [];
+
+/** Rename the action buttons to what a press does right now. */
+export function setTouchActions(labels: readonly string[]) {
+  for (let i = 0; i < actionEls.length; i++) {
+    const text = labels[i] ?? '';
+    if (actionEls[i].textContent !== text) actionEls[i].textContent = text;
+  }
+}
+
 // SPRINT is a latch, not a hold: a thumb already busy with the stick and the
-// kick buttons has none left to keep a fourth one pressed. main.ts reads it
+// action buttons has none left to keep a fourth one pressed. main.ts reads it
 // every frame and folds it into setInput.
 let sprinting = false;
 let sprintEl: HTMLElement | null = null;
@@ -183,12 +193,10 @@ export function initTouch(h: Handlers) {
   home = $('touch-home');
 
   initStick();
-  initButton($('touch-kick'), () => h.kick(0), h.kickRelease);
-  initButton($('touch-chip'), () => h.kick(1), h.kickRelease);
-  // A slide is a one-shot lunge — there is nothing to release.
-  initButton($('touch-slide'), h.tackle, () => {});
-  // Switching is one-shot too; repeated taps cycle through your team-mates.
-  initButton($('touch-switch'), h.switchPlayer, () => {});
+  actionEls = [$('touch-act0'), $('touch-act1'), $('touch-act2')];
+  actionEls.forEach((el, button) => initButton(el, () => h.action(button)));
+  // Repeated taps on SWITCH cycle through your team-mates.
+  initButton($('touch-switch'), h.switchPlayer);
   initSprint($('touch-sprint'));
   $('touch-chat').addEventListener('click', e => {
     e.preventDefault();
@@ -208,9 +216,8 @@ export function initTouch(h: Handlers) {
     );
   }
 
-  // Losing the window mid-kick would otherwise leave the kick held down.
-  // Only buttons actually held report a release, so we never fire a reducer
-  // on a connection with nothing in flight.
+  // Losing the window with a thumb down would otherwise leave a button stuck
+  // lit and deaf to the next press.
   window.addEventListener('blur', () => {
     releaseStick();
     sprinting = false;

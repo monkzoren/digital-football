@@ -67,13 +67,8 @@ const RK_DROP = 7; // neutral drop after a reconnect halt
 // game down" is about how much time you have on the ball, and at 17 the
 // whole pitch went past faster than anyone could think.
 const PLAYER_SPEED = 15.5;
-// How quickly a body reaches the speed it is asking for, and how quickly it
-// gives it up. This is the tightness dial, and it pulls against smoothness:
-// at 9/13 the ramp was long enough to read as input lag. ~0.09 s to full
-// pace and ~0.06 s to a stop keeps the easing that killed the twitchiness
-// while putting the response back.
-const ACCEL_RATE = 18.0;
-const BRAKE_RATE = 26.0;
+// NOTE: there is deliberately no acceleration constant. Movement is instant;
+// the renderer owns how smooth it LOOKS.
 const SPRINT_MUL = 1.6; // the burst still matters, it just starts lower
 const DRIBBLE_MUL = 0.85; // 4.4 m/s — running with the ball at pace
 const STAMINA_MAX = 1000;
@@ -212,6 +207,11 @@ const KEEPER_CLEAR_SPEED = 62;
 // for a beat and then picks a pass. Real football, and it also gives the
 // defending side a moment to breathe after a save.
 const KEEPER_HOLD = ticks(1.3);
+// A human on the gloves gets the six seconds the laws actually allow, and
+// then the keeper plays it anyway. Without a ceiling, a player who does not
+// press anything (or does not realise they have been given the keeper)
+// freezes the match with the ball in their hands, forever.
+const KEEPER_HOLD_HUMAN = ticks(6);
 // A throw finds a team-mate; anything longer gets hit.
 const KEEPER_THROW_RANGE = 46; // anything less is a back-pass to the striker
 
@@ -869,10 +869,11 @@ function getPlayer(ctx: Ctx): PlayerRow {
 // same body to both botPlay and the human stick, every tick, forever.
 function controlledBody(ctx: Ctx, me: PlayerRow): PlayerRow {
   if (me.matchId === 0n) return me;
+  // ANY body, keeper included. Filtering to outfielders here made the token
+  // invisible the moment control moved to the keeper, so the self-heal below
+  // decided nobody held the seat and stamped a second claimant.
   for (const b of ctx.db.player.byMatch.filter(me.matchId)) {
-    if (b.side === me.side && b.role === ROLE_OUTFIELD && b.ctrlSeat === me.teamSlot) {
-      return b;
-    }
+    if (b.side === me.side && b.ctrlSeat === me.teamSlot) return b;
   }
   const mine = ctx.db.player.identity.find(me.identity);
   if (!mine || mine.role !== ROLE_OUTFIELD) return me;
@@ -3071,120 +3072,6 @@ export const set_input = spacetimedb.reducer(
   }
 );
 
-// Press: start charging a kick. Power comes from how long the button is held
-// (kickTicks counts up in the tick); the kick itself fires on kick_release.
-export const kick = spacetimedb.reducer({ kind: t.u8() }, (ctx, { kind }) => {
-  const me = getPlayer(ctx);
-  if (me.matchId === 0n || me.spectator) return;
-  const player = controlledBody(ctx, me);
-  if (player.slideTicks > 0) return; // committed to the slide
-  const match = ctx.db.match.id.find(me.matchId);
-  if (!match || match.state !== M_LIVE) return;
-  if (match.phase !== PHASE_LIVE && match.phase !== PHASE_KICKOFF) return;
-  ctx.db.player.identity.update({
-    ...player,
-    kickHeld: true,
-    kickTicks: 0,
-    kickKind: kind === KICK_CHIP ? KICK_CHIP : KICK_NORMAL,
-  });
-});
-
-// Release: if the ball is at your feet, it flies — held direction aims it,
-// charge time powers it. A kickoff/restart first touch also goes through
-// here.
-export const kick_release = spacetimedb.reducer(ctx => {
-  const me = getPlayer(ctx);
-  if (me.matchId === 0n) return;
-  const player = controlledBody(ctx, me);
-  if (!player.kickHeld) return;
-  const released = { ...player, kickHeld: false, kickTicks: 0 };
-  const match = ctx.db.match.id.find(me.matchId);
-  if (!match || match.state !== M_LIVE) {
-    ctx.db.player.identity.update(released);
-    return;
-  }
-  const ball = ctx.db.ball.matchId.find(match.id);
-  if (!ball) {
-    ctx.db.player.identity.update(released);
-    return;
-  }
-
-  // Kickoff: any player of the kicking-off side standing at the spot may
-  // strike the dead ball to start play.
-  if (match.phase === PHASE_KICKOFF) {
-    if (match.startTicks > 0 || player.side !== match.kickoffSide) {
-      ctx.db.player.identity.update(released);
-      return;
-    }
-    const dist = Math.hypot(ball.x - player.x, ball.y - player.y);
-    if (dist > KICK_RANGE + 1.5) {
-      ctx.db.player.identity.update(released);
-      return;
-    }
-    // A kickoff is a PASS, not a shot. One press rolls it to the nearest
-    // team-mate — no charging, no aiming — which is what actually happens at
-    // a kickoff and means the restart never asks the player to fight a power
-    // meter before the game has started.
-    const mates = matchPlayers(ctx, match.id).filter(
-      p =>
-        p.side === player.side &&
-        p.role === ROLE_OUTFIELD &&
-        !p.spectator &&
-        !sameId(p.identity, player.identity)
-    );
-    let target: PlayerRow | null = null;
-    let bestD = Infinity;
-    for (const m of mates) {
-      // pick a team-mate who is level or behind: a kickoff goes sideways or
-      // back, never hoofed forward into the opposition half
-      const back = (m.y - player.y) * sideSign(player.side);
-      const d = Math.hypot(m.x - player.x, m.y - player.y);
-      if (back < -2) continue;
-      if (d < bestD) {
-        bestD = d;
-        target = m;
-      }
-    }
-    const aimX = target ? target.x - ball.x : (player.dirX || 1);
-    const aimY = target ? target.y - ball.y : sideSign(player.side) * 0.6;
-    executeKick(
-      ctx, match, ball, player, KICK_NORMAL,
-      clamp(bestD / AI_PASS_MAX, 0.22, 0.55), // firm enough to arrive, never a shot
-      aimX, aimY
-    );
-    ctx.db.match.id.update({
-      ...match,
-      phase: PHASE_LIVE,
-      graceTicks: 0,
-      pointMsg: '',
-    });
-    ctx.db.player.identity.update(released);
-    return;
-  }
-
-  if (match.phase !== PHASE_LIVE) {
-    ctx.db.player.identity.update(released);
-    return;
-  }
-  if (!mayTouch(match, player.side)) {
-    ctx.db.player.identity.update(released);
-    return;
-  }
-  const dist = Math.hypot(ball.x - player.x, ball.y - player.y);
-  if (!ball.active || dist > KICK_RANGE || ball.z > KICK_MAX_Z) {
-    ctx.db.player.identity.update(released);
-    return;
-  }
-  const power01 = clamp(player.kickTicks / KICK_CHARGE_TICKS, 0.12, 1);
-  executeKick(
-    ctx, match, ball, player, player.kickKind, power01,
-    player.dirX, player.dirY, 0, true
-  );
-  clearGraceOnTouch(ctx, match, player.side);
-  ctx.db.player.identity.update(released);
-});
-
-// Slide tackle: a committed lunge along your held direction, then a stun.
 // ---------------------------------------------------------------------------
 // Player switching. The token moves between BODIES; a person never holds one
 // directly, which is what makes "two humans on one footballer" impossible to
@@ -3200,19 +3087,16 @@ function bindPilot(ctx: Ctx, me: PlayerRow, from: PlayerRow, to: PlayerRow, lock
   const oldBody = ctx.db.player.identity.find(from.identity);
   const target = ctx.db.player.identity.find(to.identity);
   if (!target) return;
-  // Release the old body. Clearing kickHeld matters: only kick_release ever
-  // resets the charge counter, so a body abandoned mid-charge would tick its
-  // kickTicks up forever. slideTicks is deliberately PRESERVED — a man
-  // dropped mid-lunge finishes the lunge under AI, as he should.
   const stickX = oldBody ? oldBody.dirX : from.dirX;
   const stickY = oldBody ? oldBody.dirY : from.dirY;
   const sprint = oldBody ? oldBody.sprinting : from.sprinting;
   if (oldBody) {
+    // slideTicks is deliberately PRESERVED — a man dropped mid-lunge finishes
+    // the lunge under AI, as he should.
     ctx.db.player.identity.update({
       ...oldBody,
       ctrlSeat: CTRL_NONE,
       dirX: 0, dirY: 0, mvX: 0, mvY: 0, sprinting: false,
-      kickHeld: false, kickTicks: 0,
     });
   }
   // Claim the new one, CARRYING THE HELD STICK across. The client dedupes
@@ -3225,7 +3109,11 @@ function bindPilot(ctx: Ctx, me: PlayerRow, from: PlayerRow, to: PlayerRow, lock
     // clear the AI's heading with the same write, or it survives the handover
     mvX: stickX, mvY: stickY,
     sprinting: sprint,
-    kickHeld: false, kickTicks: 0,
+    // taking over a keeper mid-catch buys the full six seconds to pick a pass
+    holdTicks:
+      target.role === ROLE_KEEPER && target.holdTicks > 0
+        ? KEEPER_HOLD_HUMAN
+        : target.holdTicks,
   });
   // Re-read the person before writing their bookkeeping: when `from` IS this
   // row, a stale spread would resurrect the token on the body just vacated.
@@ -3233,21 +3121,22 @@ function bindPilot(ctx: Ctx, me: PlayerRow, from: PlayerRow, to: PlayerRow, lock
   if (person) ctx.db.player.identity.update({ ...person, switchLock: lock });
 }
 
-// Bodies on this side the given human may take over right now.
+// Bodies this human may take over. The KEEPER is included: you have to be
+// able to come out for a cross and to play the ball once you have caught it.
 function switchCandidates(ctx: Ctx, me: PlayerRow, cur: PlayerRow): PlayerRow[] {
   return matchPlayers(ctx, me.matchId).filter(
     b =>
       b.side === me.side &&
-      b.role === ROLE_OUTFIELD &&
+      !b.spectator &&
       b.slideTicks === 0 &&
       b.ctrlSeat === CTRL_NONE &&
       !sameId(b.identity, cur.identity)
   );
 }
 
-export const switch_player = spacetimedb.reducer(ctx => {
-  const me = getPlayer(ctx);
-  if (me.matchId === 0n || me.spectator) return;
+// Hand this human the next body. Shared by the SWITCH button and the
+// standalone switch_player reducer, so there is one implementation.
+function switchPilot(ctx: Ctx, me: PlayerRow): void {
   const match = ctx.db.match.id.find(me.matchId);
   if (!match || match.state !== M_LIVE) return;
   if (match.phase !== PHASE_LIVE && match.phase !== PHASE_KICKOFF) return;
@@ -3294,32 +3183,241 @@ export const switch_player = spacetimedb.reducer(ctx => {
   if (person) ctx.db.player.identity.update({ ...person, switchIdx: idx });
   const fresh = ctx.db.player.identity.find(me.identity) ?? me;
   bindPilot(ctx, fresh, cur, ranked[idx].b, SWITCH_LOCK);
-});
+}
 
-export const tackle = spacetimedb.reducer(ctx => {
-  const me = getPlayer(ctx);
-  if (me.matchId === 0n || me.spectator) return;
-  const player = controlledBody(ctx, me);
-  if (player.slideTicks > 0) return;
-  if (player.stamina < SLIDE_COST) return;
-  const match = ctx.db.match.id.find(me.matchId);
-  if (!match || match.state !== M_LIVE || match.phase !== PHASE_LIVE) return;
-  let dx = player.dirX;
-  let dy = player.dirY;
+// A committed lunge at the ball. Shared by the SLIDE button and the restart
+// handover.
+function slideTackle(ctx: Ctx, me: PlayerRow, body: PlayerRow): void {
+  if (body.slideTicks > 0 || body.stamina < SLIDE_COST) return;
+  let dx = body.dirX;
+  let dy = body.dirY;
   if (dx === 0 && dy === 0) {
-    dy = attackSign(player.side);
+    dy = attackSign(body.side);
     dx = 0;
   }
   const len = Math.hypot(dx, dy) || 1;
   ctx.db.player.identity.update({
-    ...player,
+    ...body,
     slideTicks: SLIDE_TOTAL,
     slideDirX: dx / len,
     slideDirY: dy / len,
-    stamina: Math.max(0, player.stamina - SLIDE_COST),
-    kickHeld: false,
-    kickTicks: 0,
+    stamina: Math.max(0, body.stamina - SLIDE_COST),
   });
+}
+
+export const switch_player = spacetimedb.reducer(ctx => {
+  const me = getPlayer(ctx);
+  if (me.matchId === 0n || me.spectator) return;
+  switchPilot(ctx, me);
+});
+
+// ---------------------------------------------------------------------------
+// ACTIONS. Three buttons whose meaning comes from the situation, so the whole
+// game is playable without a manual:
+//
+//   on the ball      1 PASS        2 LOB PASS      3 SHOOT
+//   chasing          1 TACKLE      2 SLIDE         3 SWITCH PLAYER
+//   keeper, holding  1 THROW       2 LONG BALL     3 PUT BALL DOWN
+//   throw-in         1 THROW IN    2 LONG THROW    3 SHORT THROW
+//   corner           1 CORNER      2 HIGH CORNER   3 SHORT CORNER
+//
+// Every one of them is a single press. Nothing is charged and nothing is
+// timed: holding a button to build power is what made this feel like a
+// fighting game rather than football.
+// ---------------------------------------------------------------------------
+const ACT_SECOND = 1;
+const ACT_THIRD = 2;
+
+// Fixed weights, so a pass is a pass every time you press it.
+const PASS_POWER = 0.42;
+const LOB_POWER = 0.6;
+const SHOT_POWER = 1.0;
+const THROW_POWER = 0.45;
+const SHORT_POWER = 0.3;
+
+// Who a pass should go to. The stick picks the DIRECTION and the game finds
+// the man — aiming a pass at raw eight-way degrees is why passing felt bad.
+function pickPassTarget(
+  me: PlayerRow,
+  mates: PlayerRow[],
+  foes: PlayerRow[],
+  stickX: number,
+  stickY: number,
+  maxRange: number
+): PlayerRow | null {
+  const stick = Math.hypot(stickX, stickY);
+  const atk = attackSign(me.side);
+  let best: PlayerRow | null = null;
+  let bestScore = -Infinity;
+  for (const m of mates) {
+    const dx = m.x - me.x;
+    const dy = m.y - me.y;
+    const d = Math.hypot(dx, dy);
+    if (d < 3 || d > maxRange) continue;
+    let score = 0;
+    if (stick > 0.01) {
+      // how well this man lines up with where I am pointing
+      const cos = (dx * stickX + dy * stickY) / (d * stick);
+      if (cos < 0.1) continue; // never pass backwards into the stick
+      score += cos * 100;
+    } else {
+      score += dy * atk * 1.2; // nothing held: the most useful forward option
+    }
+    const open = foes.reduce((acc, o) => Math.min(acc, Math.hypot(o.x - m.x, o.y - m.y)), 99);
+    score += Math.min(open, 20) * 1.5 - d * 0.25;
+    if (!laneClear(me.x, me.y, m.x, m.y, foes, 2.0)) score -= 40;
+    if (score > bestScore) {
+      bestScore = score;
+      best = m;
+    }
+  }
+  return best;
+}
+
+function sidesOf(ctx: Ctx, me: PlayerRow, body: PlayerRow) {
+  const all = matchPlayers(ctx, me.matchId);
+  return {
+    mates: all.filter(
+      p => p.side === body.side && !p.spectator && !sameId(p.identity, body.identity)
+    ),
+    foes: all.filter(p => p.side !== body.side && p.role === ROLE_OUTFIELD && !p.spectator),
+  };
+}
+
+export const action = spacetimedb.reducer({ button: t.u8() }, (ctx, { button }) => {
+  const me = getPlayer(ctx);
+  if (me.matchId === 0n || me.spectator) return;
+  const match = ctx.db.match.id.find(me.matchId);
+  if (!match || match.state !== M_LIVE) return;
+  if (match.phase !== PHASE_LIVE && match.phase !== PHASE_KICKOFF) return;
+  const body = controlledBody(ctx, me);
+  if (body.slideTicks > 0) return; // committed
+  const ball = ctx.db.ball.matchId.find(match.id);
+  if (!ball) return;
+  const { mates, foes } = sidesOf(ctx, me, body);
+  const stickX = body.dirX;
+  const stickY = body.dirY;
+  const atk = attackSign(body.side);
+
+  // ---- KEEPER WITH THE BALL IN ITS HANDS ----
+  if (body.role === ROLE_KEEPER && body.holdTicks > 0) {
+    if (button === ACT_THIRD) {
+      // PUT BALL DOWN: stop holding and keep it at your feet, so the keeper
+      // becomes an ordinary player in possession.
+      ctx.db.player.identity.update({ ...body, holdTicks: 0 });
+      ctx.db.ball.matchId.update({
+        ...ball,
+        active: true,
+        x: body.x, y: body.y + atk * 1.5, z: 0,
+        vx: 0, vy: 0, vz: 0,
+        hasOwner: true,
+        ownerId: body.identity,
+        lastTouchSide: body.side,
+        lastTouchId: body.identity,
+        lockTicks: 0,
+      });
+      return;
+    }
+    const long = button === ACT_SECOND;
+    const target = pickPassTarget(
+      body, mates, foes, stickX, stickY,
+      long ? PITCH_HALF_LEN * 1.4 : KEEPER_THROW_RANGE
+    );
+    ctx.db.player.identity.update({ ...body, holdTicks: 0 });
+    const released = { ...ball, x: body.x, y: body.y, z: 1.4, hasOwner: false, ownerId: ZERO_ID };
+    executeKick(
+      ctx, match, released, body,
+      long ? KICK_CHIP : KICK_NORMAL,
+      long ? LOB_POWER : THROW_POWER,
+      target ? target.x - body.x : stickX || 0,
+      target ? target.y - body.y : stickY || atk
+    );
+    return;
+  }
+
+  const iHaveBall = ball.hasOwner && sameId(ball.ownerId, body.identity);
+  const takingRestart =
+    match.graceTicks > 0 && match.restartSide === body.side &&
+    Math.hypot(ball.x - body.x, ball.y - body.y) < KICK_RANGE + 2;
+
+  // ---- SET PIECES ----
+  if (takingRestart || (match.phase === PHASE_KICKOFF && body.side === match.kickoffSide)) {
+    const kind = match.phase === PHASE_KICKOFF ? RK_KICKOFF : match.restartKind;
+    const short = button === ACT_THIRD;
+    const high = button === ACT_SECOND;
+    const range = short ? 26 : kind === RK_CORNER ? PITCH_HALF_LEN : PITCH_HALF_LEN * 0.8;
+    const target = pickPassTarget(body, mates, foes, stickX, stickY, range);
+    // a corner with nobody picked out goes to the middle of the goalmouth
+    const fallbackX = kind === RK_CORNER ? 0 - ball.x : stickX || 0;
+    const fallbackY = kind === RK_CORNER ? atk * PITCH_HALF_LEN - ball.y : stickY || atk;
+    executeKick(
+      ctx, match, ball, body,
+      high || kind === RK_CORNER ? KICK_CHIP : KICK_NORMAL,
+      short ? SHORT_POWER : high ? LOB_POWER : PASS_POWER,
+      target ? target.x - ball.x : fallbackX,
+      target ? target.y - ball.y : fallbackY
+    );
+    if (match.phase === PHASE_KICKOFF) {
+      ctx.db.match.id.update({ ...match, phase: PHASE_LIVE, graceTicks: 0, pointMsg: '' });
+    } else {
+      clearGraceOnTouch(ctx, match, body.side);
+    }
+    return;
+  }
+
+  // ---- ON THE BALL ----
+  if (iHaveBall) {
+    if (button === ACT_THIRD) {
+      // SHOOT. Power comes from the distance, not from a held button.
+      const goalY = atk * PITCH_HALF_LEN;
+      const aimX = clamp(stickX * (GOAL_HALF_W - 1.2), -(GOAL_HALF_W - 1.2), GOAL_HALF_W - 1.2);
+      executeKick(
+        ctx, match, ball, body, KICK_NORMAL, SHOT_POWER,
+        aimX - ball.x, goalY - ball.y, 0, true
+      );
+      return;
+    }
+    const lob = button === ACT_SECOND;
+    const target = pickPassTarget(
+      body, mates, foes, stickX, stickY, lob ? PITCH_HALF_LEN : AI_PASS_MAX
+    );
+    executeKick(
+      ctx, match, ball, body,
+      lob ? KICK_CHIP : KICK_NORMAL,
+      lob ? LOB_POWER : PASS_POWER,
+      target ? target.x - ball.x : stickX || 0,
+      target ? target.y - ball.y : stickY || atk
+    );
+    return;
+  }
+
+  // ---- CHASING ----
+  if (button === ACT_THIRD) {
+    switchPilot(ctx, me);
+    return;
+  }
+  if (button === ACT_SECOND) {
+    slideTackle(ctx, me, body);
+    return;
+  }
+  // PRIMARY while chasing: a standing challenge — a poke at the ball that
+  // wins it if you are close, with none of the slide's commitment.
+  const d = Math.hypot(ball.x - body.x, ball.y - body.y);
+  if (d < CONTROL_RADIUS * 2.2 && ball.z < CONTROL_MAX_Z + 1) {
+    const len = d || 1;
+    ctx.db.ball.matchId.update({
+      ...ball,
+      vx: ((ball.x - body.x) / len) * 18,
+      vy: ((ball.y - body.y) / len) * 18,
+      vz: 2,
+      hasOwner: false,
+      ownerId: ZERO_ID,
+      lastTouchSide: body.side,
+      lastTouchId: body.identity,
+      lockTicks: KICK_LOCK,
+    });
+    clearGraceOnTouch(ctx, match, body.side);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -3866,7 +3964,7 @@ function autoSwitchPass(ctx: Ctx, match: MatchRow, ball: BallRow | null | undefi
       ctx.db.player.identity.update({ ...person, switchLock: person.switchLock - 1 });
     }
     const held = roster.some(
-      b => b.side === person.side && b.role === ROLE_OUTFIELD && b.ctrlSeat === person.teamSlot
+      b => b.side === person.side && b.ctrlSeat === person.teamSlot
     );
     if (!held) controlledBody(ctx, ctx.db.player.identity.find(person.identity) ?? person);
   }
@@ -3875,9 +3973,7 @@ function autoSwitchPass(ctx: Ctx, match: MatchRow, ball: BallRow | null | undefi
 
   const live = matchPlayers(ctx, match.id);
   const bodyOf = (person: PlayerRow) =>
-    live.find(
-      b => b.side === person.side && b.role === ROLE_OUTFIELD && b.ctrlSeat === person.teamSlot
-    );
+    live.find(b => b.side === person.side && b.ctrlSeat === person.teamSlot);
   const ownerRow = ball.hasOwner ? live.find(b => sameId(b.identity, ball.ownerId)) : undefined;
   const leadX = ball.x + ball.vx * SWITCH_LEAD;
   const leadY = ball.y + ball.vy * SWITCH_LEAD;
@@ -3892,6 +3988,15 @@ function autoSwitchPass(ctx: Ctx, match: MatchRow, ball: BallRow | null | undefi
     if (cur.kickHeld) continue; // never yank the stick out of a shot
     const curDist = Math.hypot(cur.x - leadX, cur.y - leadY);
 
+    // 0. THE KEEPER HAS CAUGHT IT. Hand them the gloves so the distribution
+    //    is theirs to make — otherwise you watch the AI throw your ball away.
+    const holder = live.find(
+      b => b.side === fresh.side && b.role === ROLE_KEEPER && b.holdTicks > 0
+    );
+    if (holder && holder.ctrlSeat === CTRL_NONE) {
+      proposals.push({ person: fresh, from: cur, to: holder, fromDist: curDist });
+      continue;
+    }
     // 1. RECEPTION — the ball arrives at a team-mate. The keystone trigger:
     //    without it you pass and then watch the AI play your football.
     if (ownerRow && ownerRow.side === fresh.side && ownerRow.ctrlSeat === CTRL_NONE &&
@@ -4085,7 +4190,9 @@ export const game_tick = spacetimedb.reducer(
     // ---- Movement (humans by stick, outfield bots by brain, keepers) ----
     for (const p of players) {
       if (p.spectator) continue;
-      if (p.role === ROLE_KEEPER) continue; // keeperPlay moves them below
+      // AI keepers are moved by keeperPlay; a human-driven one walks like
+      // anyone else, or taking the gloves would leave you rooted to the spot.
+      if (p.role === ROLE_KEEPER && p.ctrlSeat === CTRL_NONE) continue;
       let cur = ctx.db.player.identity.find(p.identity);
       if (!cur) continue;
 
@@ -4209,22 +4316,6 @@ export const game_tick = spacetimedb.reducer(
         STAMINA_MAX
       );
       if (!moving) {
-        // still coasting to a halt? keep integrating until it settles, or a
-        // released key would stop the body dead mid-stride.
-        if (Math.hypot(cur.velX, cur.velY) > 0.02) {
-          const bk = 1 - Math.exp(-BRAKE_RATE * DT);
-          const vX = cur.velX * (1 - bk);
-          const vY = cur.velY * (1 - bk);
-          // coasting, so no sprint or dribble modifier applies
-          const coastSpeed = PLAYER_SPEED * charStat(cur.characterId).speed;
-          ctx.db.player.identity.update({
-            ...cur,
-            x: clamp(cur.x + vX * coastSpeed * DT, -P_BOUNDS_X, P_BOUNDS_X),
-            y: clamp(cur.y + vY * coastSpeed * DT, -P_BOUNDS_Y, P_BOUNDS_Y),
-            velX: vX, velY: vY, stamina, kickTicks,
-          });
-          continue;
-        }
         if (stamina !== cur.stamina || kickTicks !== cur.kickTicks || cur.velX !== 0) {
           ctx.db.player.identity.update({ ...cur, stamina, kickTicks, velX: 0, velY: 0 });
         }
@@ -4244,19 +4335,12 @@ export const game_tick = spacetimedb.reducer(
       const hx = human ? cur.dirX : cur.mvX;
       const hy = human ? cur.dirY : cur.mvY;
       const hlen = Math.hypot(hx, hy);
-      // Ease the CURRENT velocity toward the wanted one rather than snapping
-      // to it. Instantaneous velocity is what made movement read as twitchy:
-      // top pace on the first tick and a dead stop on release.
-      const wantX = hlen > 0 ? hx / hlen : 0;
-      const wantY = hlen > 0 ? hy / hlen : 0;
-      const rate = hlen > 0 ? ACCEL_RATE : BRAKE_RATE;
-      const k = 1 - Math.exp(-rate * DT);
-      let vX = cur.velX + (wantX - cur.velX) * k;
-      let vY = cur.velY + (wantY - cur.velY) * k;
-      if (Math.hypot(vX, vY) < 0.02) {
-        vX = 0;
-        vY = 0;
-      }
+      // INSTANT. The stick is the velocity — press and you are moving at pace,
+      // release and you stop. Ramping this is what made the game feel like it
+      // was answering late; the cure for a twitchy LOOK is smoothing the
+      // animation, which is the renderer's job, not slowing the simulation.
+      const vX = hlen > 0 ? hx / hlen : 0;
+      const vY = hlen > 0 ? hy / hlen : 0;
       let x = clamp(cur.x + vX * speed * DT, -P_BOUNDS_X, P_BOUNDS_X);
       let y = clamp(cur.y + vY * speed * DT, -P_BOUNDS_Y, P_BOUNDS_Y);
       // Kickoff discipline: stay in your half; non-kickoff side out of the circle.
@@ -4387,7 +4471,14 @@ export const game_tick = spacetimedb.reducer(
     const keeperHolding = matchPlayers(ctx, match.id).some(
       p => p.role === ROLE_KEEPER && p.holdTicks > 0
     );
-    if (keeperHolding) return;
+    if (keeperHolding) {
+      // The ball is out of play for everyone, but control still has to move:
+      // returning here without the auto-switch is why a keeper could catch it
+      // and the player never got the gloves.
+      ctx.db.ball.matchId.update(ball);
+      autoSwitchPass(ctx, match, ball);
+      return;
+    }
 
     const speedNow = Math.hypot(ball.vx, ball.vy);
     const fresh = matchPlayers(ctx, match.id); // positions moved this tick
@@ -4398,9 +4489,12 @@ export const game_tick = spacetimedb.reducer(
     // the boot that just struck it has to let it go
     if (ball.lockTicks > 0) ball = { ...ball, lockTicks: ball.lockTicks - 1 };
     const lockedOut = ball.lockTicks > 0 ? ball.lastTouchId : null;
+    // A keeper only enters the possession model when a HUMAN is driving it
+    // (after PUT BALL DOWN): an AI keeper uses its hands and its own code,
+    // and letting it dribble would send it up the pitch.
     const eligible = (p: PlayerRow) =>
       !p.spectator &&
-      p.role === ROLE_OUTFIELD &&
+      (p.role === ROLE_OUTFIELD || p.ctrlSeat !== CTRL_NONE) &&
       p.slideTicks === 0 &&
       (protectedSide < 0 || p.side === protectedSide) &&
       !(lockedOut !== null && sameId(p.identity, lockedOut));

@@ -11,5 +11,5 @@ import {
 } from "spacetimedb";
 
 export default {
-  kind: __t.u8(),
+  button: __t.u8(),
 };

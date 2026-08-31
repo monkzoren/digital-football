@@ -6,14 +6,13 @@
 import { type Infer as __Infer } from "spacetimedb";
 
 // Import all reducer arg schemas
+import ActionReducer from "../action_reducer";
 import ClaimWinReducer from "../claim_win_reducer";
 import CreateLobbyReducer from "../create_lobby_reducer";
 import CreatePracticeReducer from "../create_practice_reducer";
 import CreateTournamentReducer from "../create_tournament_reducer";
 import ForfeitReducer from "../forfeit_reducer";
 import JoinLobbyReducer from "../join_lobby_reducer";
-import KickReducer from "../kick_reducer";
-import KickReleaseReducer from "../kick_release_reducer";
 import LeaveLobbyReducer from "../leave_lobby_reducer";
 import PlaceBetReducer from "../place_bet_reducer";
 import RematchReducer from "../rematch_reducer";
@@ -26,16 +25,14 @@ import SetTournamentSettingsReducer from "../set_tournament_settings_reducer";
 import SpectateMatchReducer from "../spectate_match_reducer";
 import StartTournamentReducer from "../start_tournament_reducer";
 import SwitchPlayerReducer from "../switch_player_reducer";
-import TackleReducer from "../tackle_reducer";
 
+export type ActionParams = __Infer<typeof ActionReducer>;
 export type ClaimWinParams = __Infer<typeof ClaimWinReducer>;
 export type CreateLobbyParams = __Infer<typeof CreateLobbyReducer>;
 export type CreatePracticeParams = __Infer<typeof CreatePracticeReducer>;
 export type CreateTournamentParams = __Infer<typeof CreateTournamentReducer>;
 export type ForfeitParams = __Infer<typeof ForfeitReducer>;
 export type JoinLobbyParams = __Infer<typeof JoinLobbyReducer>;
-export type KickParams = __Infer<typeof KickReducer>;
-export type KickReleaseParams = __Infer<typeof KickReleaseReducer>;
 export type LeaveLobbyParams = __Infer<typeof LeaveLobbyReducer>;
 export type PlaceBetParams = __Infer<typeof PlaceBetReducer>;
 export type RematchParams = __Infer<typeof RematchReducer>;
@@ -48,5 +45,4 @@ export type SetTournamentSettingsParams = __Infer<typeof SetTournamentSettingsRe
 export type SpectateMatchParams = __Infer<typeof SpectateMatchReducer>;
 export type StartTournamentParams = __Infer<typeof StartTournamentReducer>;
 export type SwitchPlayerParams = __Infer<typeof SwitchPlayerReducer>;
-export type TackleParams = __Infer<typeof TackleReducer>;
 

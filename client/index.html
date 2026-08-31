@@ -2829,7 +2829,9 @@
       background: radial-gradient(circle at 32% 28%, var(--gold-hi), var(--gold) 55%, var(--gold-deep));
       box-shadow: 0 3px 8px rgba(0, 0, 0, 0.45), 0 0 14px rgba(255, 214, 10, 0.35);
     }
-    /* Diagonal arcade cluster: big HIT low, smaller LOB tucked above it. */
+    /* Diagonal arcade cluster: the primary action low and large, the other
+       two tucked above it. All three are relabelled every frame with what
+       they currently do, so nothing here names a specific kick. */
     #touch-actions {
       position: absolute;
       right: max(2.5%, env(safe-area-inset-right));
@@ -2853,7 +2855,7 @@
       text-shadow: 1px 2px 0 rgba(0, 0, 0, 0.55);
     }
     .touch-btn.pressed { transform: scale(0.9); filter: brightness(1.18) saturate(1.15); }
-    #touch-kick {
+    #touch-act0 {
       width: min(92px, 24cqmin);
       aspect-ratio: 1;
       font-size: min(19px, 5cqmin);
@@ -2862,7 +2864,7 @@
       background: radial-gradient(circle at 34% 28%, rgba(255, 122, 92, 0.85), rgba(198, 34, 20, 0.72) 60%, rgba(120, 10, 0, 0.72));
       box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4), inset 0 2px 6px rgba(255, 255, 255, 0.25);
     }
-    #touch-chip {
+    #touch-act1 {
       width: min(68px, 18cqmin);
       aspect-ratio: 1;
       font-size: min(14px, 3.8cqmin);
@@ -2870,9 +2872,9 @@
       border: 2px solid rgba(140, 158, 255, 0.8);
       background: radial-gradient(circle at 34% 28%, rgba(96, 118, 255, 0.75), rgba(24, 36, 140, 0.65) 60%, rgba(8, 14, 80, 0.65));
       box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4), inset 0 2px 6px rgba(255, 255, 255, 0.2);
-      margin-bottom: min(46px, 12cqmin); /* lifts CHIP into the diagonal */
+      margin-bottom: min(46px, 12cqmin); /* lifts it into the diagonal */
     }
-    #touch-slide {
+    #touch-act2 {
       width: min(56px, 15cqmin);
       aspect-ratio: 1;
       font-size: min(12px, 3.2cqmin);
@@ -3100,9 +3102,9 @@
       <div id="touch-actions">
         <button id="touch-switch" class="touch-btn" title="Switch player">⇄</button>
         <button id="touch-sprint" class="touch-btn" title="Sprint (latch)">⚡</button>
-        <button id="touch-slide" class="touch-btn">SLIDE</button>
-        <button id="touch-chip" class="touch-btn">CHIP</button>
-        <button id="touch-kick" class="touch-btn">KICK</button>
+        <button id="touch-act2" class="touch-btn">SWITCH</button>
+        <button id="touch-act1" class="touch-btn">SLIDE</button>
+        <button id="touch-act0" class="touch-btn">TACKLE</button>
       </div>
       <button id="touch-chat" class="touch-btn" title="Chat">💬</button>
     </div>

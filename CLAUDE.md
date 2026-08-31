@@ -35,6 +35,23 @@ tournaments, betting, chat, graphics) carried over. Key facts:
     pitch full of fillers silently makes every match unranked.
   - Bots steer on `mvX/mvY` FLOATS; `dirX/dirY` stay as the rendered facing.
     Signing a heading into the i8 stick is what made them zig-zag.
+  - Movement is INSTANT — the stick IS the velocity. Do not add acceleration
+    to make it look smoother: that reads as input lag, and smoothness is the
+    renderer's job (animation blending, not physics).
+  - Anything that asks "which body carries my seat" must consider EVERY body,
+    keeper included. Filtering that lookup to outfielders made the token
+    invisible once control reached the keeper, so the tick's self-heal
+    stamped a SECOND claimant onto the player's old body.
+  - Input is three context-sensitive buttons through one `action({button})`
+    reducer, resolved server-side: on the ball pass/lob/shoot, chasing
+    tackle/slide/switch, keeper throw/long ball/put-ball-down, plus the
+    set-piece variants. Every action is a single press — nothing is charged
+    or timed. Passing is ASSISTED: the stick picks a direction and
+    `pickPassTarget` finds the man, because aiming a pass at raw eight-way
+    degrees is what made passing feel awful.
+  - The client mirrors PLAYER_SPEED in `client/src/config.ts` and dead-reckons
+    with it. It has drifted out of sync twice, and both times the symptom was
+    "the game feels jittery" — check it whenever a speed changes.
   - Exactly one player per side may approach the ball: the elected presser
     (`match.presser0/1`, with hysteresis). Everyone else is pushed out of
     `AI_PRESS_BUBBLE`. That rule is what prevents the under-8s huddle.
