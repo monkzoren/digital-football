@@ -63,8 +63,16 @@ const RK_DROP = 7; // neutral drop after a reconnect halt
 // ---------------------------------------------------------------------------
 // Movement, dribbling, kicking
 // ---------------------------------------------------------------------------
-const PLAYER_SPEED = 17; // 5.2 m/s — a jog, so sprinting can mean something
-const SPRINT_MUL = 1.72; // -> 8.9 m/s, a real sprint
+// Match pace. Deliberately below a real jog: the arcade read of "slow the
+// game down" is about how much time you have on the ball, and at 17 the
+// whole pitch went past faster than anyone could think.
+const PLAYER_SPEED = 13.5;
+// How quickly a body reaches the speed it is asking for, and how quickly it
+// gives it up. Fast enough to feel tight, slow enough that nothing snaps:
+// ~0.18 s to full pace, ~0.12 s to a stop.
+const ACCEL_RATE = 9.0;
+const BRAKE_RATE = 13.0;
+const SPRINT_MUL = 1.6; // the burst still matters, it just starts lower
 const DRIBBLE_MUL = 0.85; // 4.4 m/s — running with the ball at pace
 const STAMINA_MAX = 1000;
 const SPRINT_DRAIN = 7; // per tick while sprinting and moving
@@ -459,6 +467,13 @@ const Player = table(
     // this is non-zero the ball is pinned to the gloves and nobody can play
     // it; when it runs out the keeper distributes.
     holdTicks: t.u8().default(0),
+    // NOTE: appended — CURRENT velocity as a fraction of top speed. Movement
+    // used to be instantaneous: full pace on the first tick of a press and a
+    // dead stop on release, which is what made everyone look like they were
+    // teleporting between poses. This eases toward the wanted heading, so a
+    // player leans into a run and settles out of it.
+    velX: t.f32().default(0),
+    velY: t.f32().default(0),
   }
 );
 
@@ -1135,7 +1150,9 @@ function insertKeeper(ctx: Ctx, lobbyId: bigint, match: MatchRow, side: number) 
     matchBot: true,
     mvX: 0,
     mvY: 0,
-    holdTicks: 0, // spawned with this match, deleted with it
+    holdTicks: 0,
+    velX: 0,
+    velY: 0, // spawned with this match, deleted with it
   };
   if (ctx.db.player.identity.find(identity)) ctx.db.player.identity.update(row);
   else ctx.db.player.insert(row);
@@ -1180,6 +1197,8 @@ function insertFiller(ctx: Ctx, lobbyId: bigint, match: MatchRow, side: number, 
     mvX: 0,
     mvY: 0,
     holdTicks: 0,
+    velX: 0,
+    velY: 0,
   };
   if (ctx.db.player.identity.find(identity)) ctx.db.player.identity.update(row);
   else ctx.db.player.insert(row);
@@ -2082,6 +2101,33 @@ function awardRestart(
   });
 }
 
+// Who steps up to take a restart. A goal kick is played from the edge of the
+// area by an outfielder, not by the keeper — a keeper is a bot, and handing
+// it the ball would take the restart away from the player. Everything else
+// goes to whoever is nearest the spot.
+function restartTaker(ctx: Ctx, match: MatchRow): PlayerRow | null {
+  const mine = matchPlayers(ctx, match.id).filter(
+    p =>
+      p.side === match.restartSide &&
+      p.role === ROLE_OUTFIELD &&
+      !p.spectator &&
+      p.slideTicks === 0
+  );
+  if (mine.length === 0) return null;
+  if (match.restartKind === RK_GOALKICK) {
+    // the deepest man — the centre-back — takes it
+    return mine.reduce((a, b) =>
+      toU(match.restartSide, a.y) < toU(match.restartSide, b.y) ? a : b
+    );
+  }
+  return mine.reduce((a, b) =>
+    Math.hypot(a.x - match.restartX, a.y - match.restartY) <
+    Math.hypot(b.x - match.restartX, b.y - match.restartY)
+      ? a
+      : b
+  );
+}
+
 // The half's clock ran out (called from the tick when clockTicks hits 0).
 function endOfClock(ctx: Ctx, match: MatchRow) {
   const seats = matchPlayers(ctx, match.id);
@@ -2317,6 +2363,8 @@ function insertBot(ctx: Ctx, lobbyId: bigint, index: number, side: number): Iden
     mvX: 0,
     mvY: 0,
     holdTicks: 0,
+    velX: 0,
+    velY: 0,
   };
   if (ctx.db.player.identity.find(identity)) ctx.db.player.identity.update(row);
   else ctx.db.player.insert(row);
@@ -2446,6 +2494,8 @@ export const onConnect = spacetimedb.clientConnected(ctx => {
       mvX: 0,
       mvY: 0,
       holdTicks: 0,
+      velX: 0,
+      velY: 0,
     });
     return;
   }
@@ -3930,6 +3980,27 @@ export const game_tick = spacetimedb.reducer(
               lockTicks: 0,
             });
           }
+          // HAND THE RESTART TO THE PLAYER. A restart the human watches a bot
+          // take is a restart they did not get to play — most of all a goal
+          // kick, which is their team's ball and the start of their attack.
+          // A drop ball is nobody's, so control stays where it is.
+          if (match.restartKind !== RK_DROP) {
+            // `match` is reassigned all through the tick, so bind the side
+            // here rather than reading it from inside the closure below.
+            const awarded = match.restartSide;
+            const taker = restartTaker(ctx, match);
+            if (taker) {
+              const person = matchPlayers(ctx, match.id).find(
+                p =>
+                  !p.isBot && !p.spectator && p.side === awarded &&
+                  p.role === ROLE_OUTFIELD
+              );
+              if (person) {
+                const cur = controlledBody(ctx, person);
+                bindPilot(ctx, person, cur, taker, SWITCH_LOCK);
+              }
+            }
+          }
           ctx.db.match.id.update({
             ...match,
             phase: PHASE_LIVE,
@@ -4101,8 +4172,24 @@ export const game_tick = spacetimedb.reducer(
         STAMINA_MAX
       );
       if (!moving) {
-        if (stamina !== cur.stamina || kickTicks !== cur.kickTicks) {
-          ctx.db.player.identity.update({ ...cur, stamina, kickTicks });
+        // still coasting to a halt? keep integrating until it settles, or a
+        // released key would stop the body dead mid-stride.
+        if (Math.hypot(cur.velX, cur.velY) > 0.02) {
+          const bk = 1 - Math.exp(-BRAKE_RATE * DT);
+          const vX = cur.velX * (1 - bk);
+          const vY = cur.velY * (1 - bk);
+          // coasting, so no sprint or dribble modifier applies
+          const coastSpeed = PLAYER_SPEED * charStat(cur.characterId).speed;
+          ctx.db.player.identity.update({
+            ...cur,
+            x: clamp(cur.x + vX * coastSpeed * DT, -P_BOUNDS_X, P_BOUNDS_X),
+            y: clamp(cur.y + vY * coastSpeed * DT, -P_BOUNDS_Y, P_BOUNDS_Y),
+            velX: vX, velY: vY, stamina, kickTicks,
+          });
+          continue;
+        }
+        if (stamina !== cur.stamina || kickTicks !== cur.kickTicks || cur.velX !== 0) {
+          ctx.db.player.identity.update({ ...cur, stamina, kickTicks, velX: 0, velY: 0 });
         }
         continue;
       }
@@ -4119,9 +4206,22 @@ export const game_tick = spacetimedb.reducer(
       const human = cur.ctrlSeat !== CTRL_NONE;
       const hx = human ? cur.dirX : cur.mvX;
       const hy = human ? cur.dirY : cur.mvY;
-      const len = Math.hypot(hx, hy) || 1;
-      let x = clamp(cur.x + (hx / len) * speed * DT, -P_BOUNDS_X, P_BOUNDS_X);
-      let y = clamp(cur.y + (hy / len) * speed * DT, -P_BOUNDS_Y, P_BOUNDS_Y);
+      const hlen = Math.hypot(hx, hy);
+      // Ease the CURRENT velocity toward the wanted one rather than snapping
+      // to it. Instantaneous velocity is what made movement read as twitchy:
+      // top pace on the first tick and a dead stop on release.
+      const wantX = hlen > 0 ? hx / hlen : 0;
+      const wantY = hlen > 0 ? hy / hlen : 0;
+      const rate = hlen > 0 ? ACCEL_RATE : BRAKE_RATE;
+      const k = 1 - Math.exp(-rate * DT);
+      let vX = cur.velX + (wantX - cur.velX) * k;
+      let vY = cur.velY + (wantY - cur.velY) * k;
+      if (Math.hypot(vX, vY) < 0.02) {
+        vX = 0;
+        vY = 0;
+      }
+      let x = clamp(cur.x + vX * speed * DT, -P_BOUNDS_X, P_BOUNDS_X);
+      let y = clamp(cur.y + vY * speed * DT, -P_BOUNDS_Y, P_BOUNDS_Y);
       // Kickoff discipline: stay in your half; non-kickoff side out of the circle.
       if (match.phase === PHASE_KICKOFF) {
         y = sideSign(cur.side) > 0 ? Math.max(y, 0.5) : Math.min(y, -0.5);
@@ -4132,7 +4232,7 @@ export const game_tick = spacetimedb.reducer(
           y = sideSign(cur.side) > 0 ? Math.max(y, 0.5) : Math.min(y, -0.5);
         }
       }
-      ctx.db.player.identity.update({ ...cur, x, y, stamina, kickTicks });
+      ctx.db.player.identity.update({ ...cur, x, y, stamina, kickTicks, velX: vX, velY: vY });
     }
 
     // Keepers.

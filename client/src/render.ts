@@ -2936,6 +2936,8 @@ const CAM_SIN = Math.sin(CAM_ELEV);
 const CAM_COS = Math.cos(CAM_ELEV);
 const CAM_FOV = 36;
 const K_TRUCK = 0.72; // body pans slower than head: 1.0 would be a turntable
+// How far the ball may drift from the aim before the camera moves at all.
+const CAM_DEADZONE = 6;
 const S_LIMIT = PITCH_HALF_LEN * 0.65; // the rail stops short of the goal ends
 const R_DEFAULT = PITCH_HALF_LEN * 1.14;
 const R_MIN = PITCH_HALF_LEN * 0.95;
@@ -3107,10 +3109,13 @@ function updateBroadcastCamera(scene: Scene, dt: number, now: number) {
   } else {
     // 2-unit deadzone: a ball shuffling at someone's feet must not drag the
     // whole ground with it
+    // A wide deadzone plus a slow gain is what makes this read as a camera
+    // operator rather than a servo bolted to the ball: small touches near the
+    // aim move nothing at all, and real travel is followed gently.
     const d = tgtS - aimS;
-    if (Math.abs(d) > 2) {
-      const want = tgtS - Math.sign(d) * 2;
-      aimS += (want - aimS) * (1 - Math.exp(-7.5 * dt));
+    if (Math.abs(d) > CAM_DEADZONE) {
+      const want = tgtS - Math.sign(d) * CAM_DEADZONE;
+      aimS += (want - aimS) * (1 - Math.exp(-3.2 * dt));
     }
   }
   // Pushing the aim toward the camera's own touchline is what sets the
@@ -3129,9 +3134,9 @@ function updateBroadcastCamera(scene: Scene, dt: number, now: number) {
     wFloor,
     CAM_AIM_W + THREE.MathUtils.clamp(tgtW * 0.35, -7, 7)
   );
-  aimW = jump ? wantW : aimW + (wantW - aimW) * (1 - Math.exp(-4 * dt));
+  aimW = jump ? wantW : aimW + (wantW - aimW) * (1 - Math.exp(-2.2 * dt));
   const truck = THREE.MathUtils.clamp(K_TRUCK * aimS, -S_LIMIT, S_LIMIT);
-  camS = jump ? truck : camS + (truck - camS) * (1 - Math.exp(-3.2 * dt));
+  camS = jump ? truck : camS + (truck - camS) * (1 - Math.exp(-1.8 * dt));
   camReady = true;
 
   // --- the points that must be in shot -------------------------------------
@@ -3199,7 +3204,10 @@ function updateBroadcastCamera(scene: Scene, dt: number, now: number) {
   rNeed = THREE.MathUtils.clamp(rNeed, R_MIN, R_MAX);
   // Widen FAST so the play is never lost, tighten SLOWLY so the frame does
   // not pump on a dribble. The asymmetry is the whole trick.
-  const rk = punch ? 9 : rNeed > camR ? 5.5 : 2.2;
+  // Widen fast enough not to lose the play, tighten slowly so the frame does
+  // not pump. Both rates are gentler than they were: at 5.5/2.2 the boom was
+  // visibly breathing on every dribble.
+  const rk = punch ? 9 : rNeed > camR ? 3.2 : 1.1;
   camR = jump ? rNeed : camR + (rNeed - camR) * (1 - Math.exp(-rk * dt));
 
   camera.position.set(camS, CAM_AIM_Y + camR * CAM_SIN, aimW + camR * CAM_COS);

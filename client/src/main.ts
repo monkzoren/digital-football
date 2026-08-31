@@ -393,6 +393,9 @@ const smoothPos = new Map<string, { x: number; y: number }>();
 // Sprint multiplier — mirrors SPRINT_MUL in spacetimedb/src/index.ts.
 const SPRINT_MUL = 1.34;
 
+// Smoothed render position of the ball, so a dribble does not strobe.
+let smoothBall: { x: number; y: number; z: number } | null = null;
+
 function renderPosition(p: any, now: number, frameDt: number): { x: number; y: number } {
   const hex = p.identity.toHexString();
   const sliding = (p.slideTicks ?? 0) > 0;
@@ -400,12 +403,18 @@ function renderPosition(p: any, now: number, frameDt: number): { x: number; y: n
   const elapsed = sliding ? 0 : Math.min(0.1, (now - stamped) / 1000);
   const speed =
     PLAYER_SPEED * (CHAR_SPEED[p.characterId] ?? 1) * (p.sprinting ? SPRINT_MUL : 1);
-  const len = Math.hypot(p.dirX, p.dirY) || 1;
-  const tx = p.x + (p.dirX / len) * speed * elapsed;
-  const ty = p.y + (p.dirY / len) * speed * elapsed;
+  // Dead-reckon along the CURRENT VELOCITY the server is integrating, not
+  // along the stick. dirX/dirY is the 8-way rendered facing and mv is only
+  // the wanted heading; velX/velY is what actually moves the body, and it
+  // ramps in and out. Predicting along anything else disagrees with the
+  // server every tick, and the constant correction is what reads as jitter.
+  const vx = p.velX ?? p.mvX ?? p.dirX;
+  const vy = p.velY ?? p.mvY ?? p.dirY;
+  const tx = p.x + vx * speed * elapsed;
+  const ty = p.y + vy * speed * elapsed;
   let sp = smoothPos.get(hex);
   if (!sp || Math.hypot(sp.x - tx, sp.y - ty) > 12) sp = { x: tx, y: ty };
-  const alpha = 1 - Math.exp(-frameDt * (sliding ? 4.5 : 16));
+  const alpha = 1 - Math.exp(-frameDt * (sliding ? 4.5 : 11));
   sp = { x: sp.x + (tx - sp.x) * alpha, y: sp.y + (ty - sp.y) * alpha };
   smoothPos.set(hex, sp);
   return sp;
@@ -4078,8 +4087,18 @@ function frame() {
     const owner = ownerHex
       ? players.find(p => p.identity.toHexString() === ownerHex)
       : undefined;
+    const bsm = smoothBall ?? { x, y, z };
+    // a loose ball is already smooth (real velocity integration), so this only
+    // has to take the stutter off a dribble — hence the fast gain
+    const bAlpha = 1 - Math.exp(-frameDt * (ball.hasOwner ? 14 : 26));
+    smoothBall = {
+      x: bsm.x + (x - bsm.x) * bAlpha,
+      y: bsm.y + (y - bsm.y) * bAlpha,
+      z: bsm.z + (z - bsm.z) * bAlpha,
+    };
+    if (Math.hypot(smoothBall.x - x, smoothBall.y - y) > 10) smoothBall = { x, y, z };
     renderBall = {
-      x, y, z,
+      x: smoothBall.x, y: smoothBall.y, z: smoothBall.z,
       vx: ball.vx, vy: ball.vy, vz,
       lastTouchSide: ball.lastTouchSide,
       hasOwner: ball.hasOwner,

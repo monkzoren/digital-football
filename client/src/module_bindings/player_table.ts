@@ -42,4 +42,6 @@ export default __t.row({
   mvX: __t.f32().name("mv_x"),
   mvY: __t.f32().name("mv_y"),
   holdTicks: __t.u8().name("hold_ticks"),
+  velX: __t.f32().name("vel_x"),
+  velY: __t.f32().name("vel_y"),
 });

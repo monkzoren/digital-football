@@ -231,6 +231,8 @@ export const Player = __t.object("Player", {
   mvX: __t.f32(),
   mvY: __t.f32(),
   holdTicks: __t.u8(),
+  velX: __t.f32(),
+  velY: __t.f32(),
 });
 export type Player = __Infer<typeof Player>;
 
