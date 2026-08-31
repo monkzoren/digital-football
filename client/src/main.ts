@@ -6,7 +6,7 @@ import {
   PHASE_KICKOFF, PHASE_LIVE, PHASE_PAUSE, PHASE_OVER,
   KICK_NORMAL, KICK_CHIP, KICK_CHARGE_SECS, STAMINA_MAX,
   RK_NONE, RK_KICKOFF, RK_KICKIN, RK_GOALKICK, RK_CORNER, RK_HALFTIME, RK_OVERTIME, RK_DROP,
-  HALF_SECONDS, OT_SECONDS, ROLE_KEEPER,
+  HALF_SECONDS, OT_SECONDS, ROLE_KEEPER, SQUAD_SIZE, KEEPER_RIG_SEAT,
   totalXpFor, levelFor, LEVEL_MAX, CLAIM_UNLOCK_SECS,
 } from './config';
 import {
@@ -1984,6 +1984,18 @@ function sidePlayers(players: any[], side: number): any[] {
     .filter(p => p.side === side && (p.role ?? 0) !== ROLE_KEEPER)
     .sort((a, b) => (a.teamSlot ?? 0) - (b.teamSlot ?? 0));
 }
+// Which rig draws a player: the renderer keeps SQUAD_SIZE rigs per side and
+// parks every keeper on the last seat, because the module hands keepers
+// teamSlot 0 — the first outfielder's seat.
+function rigSlotOf(p: any): number {
+  // an outfielder never takes the keeper's seat: a teamSlot past the squad
+  // would index a rig (and a head annotation) that doesn't exist
+  const seat =
+    (p.role ?? 0) === ROLE_KEEPER
+      ? KEEPER_RIG_SEAT
+      : Math.min(p.teamSlot ?? 0, KEEPER_RIG_SEAT - 1);
+  return p.side * SQUAD_SIZE + seat;
+}
 function sideLabel(players: any[], side: number): string {
   return (
     sidePlayers(players, side)
@@ -2150,10 +2162,30 @@ let lastBubbleChatId = -1n;
 
 // Head-anchored bubbles: emote pops + speech bubbles pinned above each
 // on-pitch player's head (repositioned every frame from headScreenPos).
-const headAnnoEls = [$('head-anno-0'), $('head-anno-1')] as HTMLElement[];
-const emotePopEls = [$('emote-pop-0'), $('emote-pop-1')] as HTMLElement[];
-const speechEls = [$('speech-0'), $('speech-1')] as HTMLElement[];
-const nameTagEls = [$('name-tag-0'), $('name-tag-1')] as HTMLElement[];
+// One column per rig seat — the pitch holds a squad a side, so the count
+// belongs to the renderer, not to the page, and the markup is built here.
+const RIG_COUNT = SQUAD_SIZE * 2;
+const headAnnoEls: HTMLElement[] = [];
+const emotePopEls: HTMLElement[] = [];
+const speechEls: HTMLElement[] = [];
+const nameTagEls: HTMLElement[] = [];
+const headAnnoHost = $('head-annos');
+for (let slot = 0; slot < RIG_COUNT; slot++) {
+  const col = document.createElement('div');
+  col.className = 'head-anno';
+  const mk = (cls: string) => {
+    const el = document.createElement('div');
+    el.className = cls;
+    col.appendChild(el);
+    return el;
+  };
+  // order matters: the nameplate is last so bubbles stack above it
+  emotePopEls.push(mk('emote-pop'));
+  speechEls.push(mk('speech'));
+  nameTagEls.push(mk('name-tag'));
+  headAnnoHost.appendChild(col);
+  headAnnoEls.push(col);
+}
 for (const el of [...emotePopEls, ...speechEls]) {
   el.addEventListener('animationend', () => el.classList.remove('show'));
 }
@@ -2171,9 +2203,9 @@ function popBubble(el: HTMLElement, text: string, ms: number) {
 }
 
 function positionHeadAnnos(active: boolean) {
-  for (let side = 0; side < 2; side++) {
-    const el = headAnnoEls[side];
-    const pos = active ? headScreenPos(side) : null;
+  for (let slot = 0; slot < RIG_COUNT; slot++) {
+    const el = headAnnoEls[slot];
+    const pos = active ? headScreenPos(slot) : null;
     if (!pos) {
       el.style.visibility = 'hidden';
       continue;
@@ -2181,6 +2213,10 @@ function positionHeadAnnos(active: boolean) {
     el.style.visibility = 'visible';
     el.style.left = `${pos.x}px`;
     el.style.top = `${pos.y}px`;
+    // bodies overlap on a crowded pitch: the nearer head's plate wins, and
+    // depth grows with distance from the camera. #head-annos is the stacking
+    // context, so these only order the plates against each other.
+    el.style.zIndex = String(Math.round((1 - pos.depth) * 10000));
   }
 }
 
@@ -2285,12 +2321,12 @@ lobbyChatInput.addEventListener('keydown', e => {
   else if (e.key === 'Escape') lobbyChatInput.blur();
 });
 
-// pitchSideByName maps a player on the pitch to their match side; when a
-// sender is on the pitch their messages surface as bubbles above their head,
-// and emotes stay out of the feed. Off-pitch senders (lobby, spectators) fall
-// back to the corner feed for everything.
-function updateChat(lobbyId: bigint, myName: string, pitchSideByName?: Map<string, number>) {
-  if (!pitchSideByName) positionHeadAnnos(false); // overlay screens: nobody on the pitch
+// pitchSlotByName maps a player on the pitch to their rig seat; when a
+// sender is on the pitch their messages surface as bubbles above their own
+// head, and emotes stay out of the feed. Off-pitch senders (lobby,
+// spectators) fall back to the corner feed for everything.
+function updateChat(lobbyId: bigint, myName: string, pitchSlotByName?: Map<string, number>) {
+  if (!pitchSlotByName) positionHeadAnnos(false); // overlay screens: nobody on the pitch
   const rows = [] as any[];
   for (const m of conn.db.chat.iter()) if (m.lobbyId === lobbyId) rows.push(m);
   rows.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
@@ -2311,7 +2347,7 @@ function updateChat(lobbyId: bigint, myName: string, pitchSideByName?: Map<strin
     };
     chatFeed.innerHTML = '';
     for (const m of recent) {
-      if (m.emote && pitchSideByName?.has(m.senderName)) continue;
+      if (m.emote && pitchSlotByName?.has(m.senderName)) continue;
       chatFeed.appendChild(chatLine(m));
     }
     // the lobby's chat box shows a longer scrollback, pinned to the newest
@@ -2321,12 +2357,12 @@ function updateChat(lobbyId: bigint, myName: string, pitchSideByName?: Map<strin
     for (const m of recent) {
       if (m.id <= lastBubbleChatId) continue;
       lastBubbleChatId = m.id;
-      const side = pitchSideByName?.get(m.senderName);
-      if (side === undefined) continue;
+      const slot = pitchSlotByName?.get(m.senderName);
+      if (slot === undefined) continue;
       if (m.emote) {
-        popBubble(emotePopEls[side], m.text, 2300);
+        popBubble(emotePopEls[slot], m.text, 2300);
         playEmote();
-      } else popBubble(speechEls[side], m.text, 4600);
+      } else popBubble(speechEls[slot], m.text, 4600);
     }
   }
 }
@@ -3938,21 +3974,41 @@ function frame() {
       z = Math.max(0, r.z + r.vz * dt + (r.z > 0 ? 0.5 * grav * dt * dt : 0));
       vz = r.z > 0 ? r.vz + grav * dt : r.vz;
     }
+    // whose feet it is at: the camera leads a carried ball the way its owner
+    // is attacking, never on a dribble's stop-start velocity
+    const ownerHex = ball.hasOwner ? ball.ownerId.toHexString() : '';
+    const owner = ownerHex
+      ? players.find(p => p.identity.toHexString() === ownerHex)
+      : undefined;
     renderBall = {
       x, y, z,
       vx: ball.vx, vy: ball.vy, vz,
       lastTouchSide: ball.lastTouchSide,
       hasOwner: ball.hasOwner,
+      ownerSide: owner ? owner.side : ball.lastTouchSide,
     };
   }
 
   // HUD
   const goals = goalsFor(viewMatch.id);
+  const touchHex = ball ? ball.lastTouchId.toHexString() : '';
+  const striker = ball ? players.find(p => p.identity.toHexString() === touchHex) : undefined;
+  // Mirrors controlledBody() in the module: my stick drives whichever body on
+  // my side has claimed my seat, which after a switch is not my own row.
+  const focusBody =
+    myMatch && !spectating
+      ? players.find(
+          p =>
+            p.side === me.side &&
+            (p.role ?? 0) !== ROLE_KEEPER &&
+            p.ctrlSeat === (me.teamSlot ?? 0)
+        )
+      : undefined;
   updatePlates(viewMatch, players, mSide);
   updateClock(viewMatch);
   updatePointCard(viewMatch, players, goals);
-  const pitchSideByName = new Map(players.map(p => [p.name, p.side] as [string, number]));
-  updateChat(room.id, me.name, pitchSideByName);
+  const pitchSlotByName = new Map(players.map(p => [p.name, rigSlotOf(p)] as [string, number]));
+  updateChat(room.id, me.name, pitchSlotByName);
   goalSound(viewMatch, mSide);
   setTouchVisible(!spectating);
   // spectator chrome: exit pill, the broadcast bug under the left plate, and
@@ -3975,13 +4031,14 @@ function frame() {
         : 'WATCHING LIVE';
     const chipEl = $('spectate-chip-text');
     if (chipEl.textContent !== chipText) chipEl.textContent = chipText;
-    for (const side of [0, 1]) {
-      const tag = nameTagEls[side];
-      // Solo matches carry the rating on the nameplate; a team's average
-      // would just be noise, so team labels stay as they are.
-      const team = sidePlayers(players, side);
-      const rating = team.length === 1 ? mmrOf(team[0]) : null;
-      const name = sideLabel(players, side) + (rating === null ? '' : ` · ${rating}`);
+    // A plate per head, so every body on the pitch says who it is; the ones
+    // with no player are hidden with their column (see positionHeadAnnos).
+    for (const p of players) {
+      const tag = nameTagEls[rigSlotOf(p)];
+      // Solo matches carry the rating on the nameplate; in team play the
+      // seats are crowded enough without a rating on each one.
+      const rating = sidePlayers(players, p.side).length === 1 ? mmrOf(p) : null;
+      const name = (p.name || 'PLAYER') + (rating === null ? '' : ` · ${rating}`);
       if (tag && tag.textContent !== name) tag.textContent = name;
     }
   }
@@ -4032,7 +4089,7 @@ function frame() {
         serverX: p.x,
         serverY: p.y,
         side: p.side,
-        rigSlot: p.side + (p.teamSlot ?? 0) * 2,
+        rigSlot: rigSlotOf(p),
         kickTicks: p.kickTicks ?? 0,
         kickKind: p.kickKind ?? 0,
         kickHeld: !!p.kickHeld,
@@ -4045,6 +4102,16 @@ function frame() {
       };
     }),
     ball: renderBall,
+    // who struck it, so the renderer animates the boot that actually kicked
+    // instead of guessing at the body nearest the ball
+    strikerRigSlot: striker ? rigSlotOf(striker) : undefined,
+    // how the camera frames a stoppage — a corner wants the flag and the near
+    // post in shot, a kick-off restart is the cue for the goal cut
+    restartKind: viewMatch.restartKind ?? RK_NONE,
+    // the body my stick is actually driving (after a switch it is a
+    // team-mate's): the camera has to keep it in frame or a switch to a man
+    // off-screen leaves me blind. Spectators have none, and get the wander.
+    focusSlot: focusBody ? rigSlotOf(focusBody) : undefined,
   };
 
   // ----- replay recording + playback -----

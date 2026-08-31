@@ -7,7 +7,12 @@ import {
   BOX_DEPTH,
   BOX_HALF_W,
   CENTER_CIRCLE_R,
+  BALL_RADIUS,
   CONTROL_RADIUS,
+  SQUAD_SIZE,
+  ROLE_KEEPER,
+  RK_KICKOFF,
+  RK_CORNER,
 } from './config';
 import { CHARACTERS, type Character, type HairStyle } from './characters';
 import {
@@ -21,11 +26,15 @@ import {
 import { getGraphics, onGraphicsChange, type GraphicsSettings } from './graphics';
 
 // ---------------------------------------------------------------------------
-// Real-3D Virtua Striker-style renderer (Three.js / WebGL).
+// Real-3D broadcast-style renderer (Three.js / WebGL).
 //
 // Game world coords: x across the pitch, y along it (halfway line at y=0),
-// z up. Three.js coords: (wx, wz, -wy) — the camera sits at positive Z behind
-// the near goal. scene.flip mirrors x/y so the local player attacks away.
+// z up. Three.js coords TRANSPOSE that, because football is watched side-on:
+// (wy*flip, wz, wx*flip). Three-x runs the LENGTH of the pitch — screen
+// horizontal, a goal at each edge — and three-z runs across it, +z toward the
+// camera on the near touchline. `flip` is a 180° YAW about the vertical, never
+// a mirror (the map's determinant is +1 either way), so faces, shirt numbers
+// and hair keep their handedness while both players attack screen-right.
 //
 // Animation is event-driven: the server flips ball.lastTouchSide at the exact
 // contact tick, so we key full kick cycles (plant → strike → follow-through)
@@ -38,7 +47,7 @@ export interface RenderPlayer {
   serverX: number; // raw (un-smoothed) server position — slide target
   serverY: number;
   side: number;
-  rigSlot?: number; // stable rig index: side + teamSlot*2
+  rigSlot?: number; // stable rig index: side*SQUAD_SIZE + seat (keeper last)
   kickTicks: number; // kick charge counter (0 = not charging)
   kickKind: number; // 0 normal · 1 chip
   kickHeld: boolean;
@@ -59,6 +68,10 @@ export interface RenderBall {
   vz: number;
   lastTouchSide: number;
   hasOwner: boolean; // true = at somebody's feet, being dribbled
+  // Side of the dribbler (only meaningful while hasOwner). A carried ball's
+  // velocity snaps between stride and knock-on every few ticks, so the camera
+  // leads with the direction he's ATTACKING, never with that velocity.
+  ownerSide?: number;
 }
 
 export interface Scene {
@@ -68,26 +81,44 @@ export interface Scene {
   kickoffSide: number;
   players: RenderPlayer[];
   ball: RenderBall | null;
-  replayCam?: boolean; // replay playback uses the broadcast side camera
+  // Who just kicked, from the ball's lastTouchId. With a squad a side the
+  // nearest body to the ball is a bad guess — it animates a bystander, or
+  // the keeper stood behind the striker.
+  strikerRigSlot?: number;
+  // RK_* of the restart being set up (0 = none). A corner is framed with the
+  // flag and the near post in shot; a goal cut needs RK_KICKOFF to fire.
+  restartKind?: number;
+  // The body THIS client is driving — after a player switch that is not
+  // necessarily their own row. The camera always keeps it in frame, or a
+  // switch to a man off-screen leaves you blind.
+  focusSlot?: number;
+  replayCam?: boolean; // replay playback cuts to the goal-end camera
 }
+
+// One rig per seat on both squads: rigSlot = side * SQUAD_SIZE + seat.
+const RIG_COUNT = SQUAD_SIZE * 2;
 
 const PHASE_KICKOFF = 1;
 const PHASE_LIVE = 2;
 const PHASE_PAUSE = 3;
 
-// Stereo position for a sound at world/three x (camera looks down -z, so
-// screen left/right tracks x directly).
-const panOf = (x: number) => Math.max(-1, Math.min(1, x / 45));
+// Stereo position for a sound at three-x (the along-pitch axis, which IS
+// screen horizontal). The rail camera trucks, so the pan is measured from
+// where the camera currently stands — otherwise a kick dead centre of frame
+// at the far end would still hard-pan to one ear.
+const panOf = (x: number) => Math.max(-1, Math.min(1, (x - camS) / 34));
 // Bounce timbre per PITCHES index: grass (soft), night grass (soft), street
 // concrete (hard slap).
 const BOUNCE_BRIGHT = [0.85, 0.85, 1.2];
 
-const GROUND_X = 58; // generous side run-off, VT2 style
-const GROUND_Y = 64; // hoarding / stand line
-// The ground plane runs past the camera (z=84): portrait's tall FOV looks
-// steeply down near the bottom edge, and must always land on grass, never
-// off the edge of the world.
-const GROUND_EXT_Y = 100;
+// Ground extents, in the transposed frame: three-x along the pitch, three-z
+// across it. The bowl (hoardings, stands, towers) is built on LEN x WID; the
+// grass runs on past the camera to EXT, because portrait's tall FOV looks
+// steeply down near the bottom edge and must always land on turf, never off
+// the edge of the world.
+const GROUND_LEN = 92; // along: 26 units of run-off past each goal line
+const GROUND_WID = 54; // across: 20 units outside each touchline
+const GROUND_EXT = 140; // across, grass only — well behind the camera rail
 
 const COLORS = {
   sky: 0xbcd8ee,
@@ -106,6 +137,7 @@ let scene3: THREE.Scene;
 let camera: THREE.PerspectiveCamera;
 let ballMesh: THREE.Mesh;
 let ballBlob: THREE.Mesh;
+let ballDrop: THREE.Line; // hairline from an airborne ball down to its blob
 const trailMeshes: THREE.Mesh[] = [];
 const trailHistory: THREE.Vector3[] = [];
 // SUPER FINISHER props: the flaming ball's light, the launch shockwave ring,
@@ -145,31 +177,38 @@ function observeCanvasSize() {
   }
 }
 
+// World -> three. A cyclic permutation (determinant +1) with wx and wy BOTH
+// negated for flip = -1, which keeps the determinant +1: `flip` is therefore
+// a 180° yaw, not a mirror, and no model is ever turned inside out.
 const toThree = (flip: number, wx: number, wy: number, wz: number) =>
-  new THREE.Vector3(wx * flip, wz, -wy * flip);
+  new THREE.Vector3(wy * flip, wz, wx * flip);
+
+// Side 0 defends -y and attacks +y (mirrors the module); after the transpose
+// that is three-x, so this is the direction a side attacks ON SCREEN. It is
+// +1 for whoever the frame is flipped for — both players attack right.
+const attackDir = (side: number, flip: number) => (side === 0 ? 1 : -1) * flip;
 
 // ---------------------------------------------------------------------------
 // JUICE: camera shake + particle bursts
 // ---------------------------------------------------------------------------
-// Dreamcast VT-style camera: a touch lower and wider, court filling the frame
-const CAM_POS = new THREE.Vector3(0, 34, 84);
-const CAM_TARGET = new THREE.Vector3(0, -3, -14);
 let shakeAmp = 0;
 // replay cam: smoothed look-at that trails the ball through the flight
 let replayLook: THREE.Vector3 | null = null;
-// VAR verdict cam: height above the bounce mark, easing down (0 = inactive)
-let varCamH = 0;
 
 export function addShake(strength: number) {
   shakeAmp = Math.min(2.2, shakeAmp + strength);
 }
 
 // Screen-space anchor for DOM overlays (emote pops, speech bubbles): the
-// point just above a player's head, in CSS pixels relative to the canvas.
+// point just above one rig's head, in CSS pixels relative to the canvas.
+// depth is that point's projected z — it grows with distance from the camera,
+// so callers can stack a near player's plate over a far one's.
 const headProj = new THREE.Vector3();
-export function headScreenPos(side: number): { x: number; y: number } | null {
+export function headScreenPos(
+  rigSlot: number
+): { x: number; y: number; depth: number } | null {
   if (!renderer || !camera) return null;
-  const rig = playerRigs[side];
+  const rig = playerRigs[rigSlot];
   if (!rig || !rig.root.visible) return null;
   rig.head.getWorldPosition(headProj);
   headProj.y += 0.85; // clear the crown (and hair)
@@ -178,6 +217,7 @@ export function headScreenPos(side: number): { x: number; y: number } | null {
   return {
     x: (headProj.x * 0.5 + 0.5) * cssW,
     y: (-headProj.y * 0.5 + 0.5) * cssH,
+    depth: headProj.z,
   };
 }
 
@@ -337,7 +377,9 @@ interface PlayerRig {
   hairMat: THREE.MeshLambertMaterial;
   accentMat: THREE.MeshLambertMaterial;
   hairGroup: THREE.Group;
+  gloveL: THREE.Mesh; gloveR: THREE.Mesh; // keeper gloves — hidden otherwise
   charId: number; // character currently dressed on this rig
+  keeperKit: boolean; // which kit that character is wearing
   head: THREE.Mesh;
   pose: Pose;
   yaw: number; // current facing (blended toward movement / ball)
@@ -418,33 +460,6 @@ const _dq2 = new THREE.Quaternion();
 const _dq3 = new THREE.Quaternion();
 const _UP = new THREE.Vector3(0, 1, 0);
 const _RIGHT = new THREE.Vector3(1, 0, 0);
-
-// Arm chain lengths for the racket IK (shoulder→elbow, elbow→racket head).
-const IK_UPPER = 0.95;
-const IK_LOWER = 2.0;
-
-// Two-bone IK: point the racket-arm chain at the ball so the strings meet it
-// at contact. Blended by w so the procedural swing still provides the sweep.
-const _ikV = new THREE.Vector3();
-const _ikQ = new THREE.Quaternion();
-const _ikQ2 = new THREE.Quaternion();
-function solveArmIK(rig: PlayerRig, targetWorld: THREE.Vector3, w: number) {
-  rig.root.updateWorldMatrix(true, true);
-  rig.shoulderR.getWorldPosition(_ikV);
-  const dir = targetWorld.clone().sub(_ikV);
-  const dist = THREE.MathUtils.clamp(dir.length(), 0.6, IK_UPPER + IK_LOWER - 0.05);
-  dir.normalize();
-  rig.shoulderR.parent!.getWorldQuaternion(_ikQ);
-  const dLocal = dir.applyQuaternion(_ikQ2.copy(_ikQ).invert());
-  const qTarget = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, -1, 0), dLocal);
-  rig.shoulderR.quaternion.slerp(qTarget, w);
-  const cosE = THREE.MathUtils.clamp(
-    (IK_UPPER * IK_UPPER + IK_LOWER * IK_LOWER - dist * dist) / (2 * IK_UPPER * IK_LOWER),
-    -1, 1
-  );
-  const bend = Math.PI - Math.acos(cosE);
-  rig.elbowR.rotation.x = THREE.MathUtils.lerp(rig.elbowR.rotation.x, bend, w);
-}
 
 function blendAngle(current: number, target: number, rate: number, dt: number): number {
   return current + wrapAngle(target - current) * (1 - Math.exp(-rate * dt));
@@ -1009,9 +1024,11 @@ function buildHair(grp: THREE.Group, mat: THREE.MeshLambertMaterial, style: Hair
   }
 }
 
-// Dress a rig as a character: kit colors, skin tone, face, hair, body.
-function applyCharacter(rig: PlayerRig, char: Character) {
-  if (rig.charId === char.id) return;
+// Dress a rig as a character: kit colors, skin tone, face, hair, body. The
+// kit is part of the identity check — a rig handed to a keeper has to be
+// re-dressed even when the character on it hasn't changed.
+function applyCharacter(rig: PlayerRig, char: Character, keeper = false) {
+  if (rig.charId === char.id && rig.keeperKit === keeper) return;
   rig.charId = char.id;
   rig.torsoMat.color.setHex(char.color);
   rig.torsoMat.map = makeShirtTexture(char.id);
@@ -1026,6 +1043,7 @@ function applyCharacter(rig: PlayerRig, char: Character) {
   buildBody(rig, char);
   buildHair(rig.hairGroup, rig.hairMat, char.hairStyle);
   applyPhysique(rig, char);
+  applyKeeperKit(rig, keeper); // after buildBody — it re-points its materials
 }
 
 // Body proportions mirror the stat sheet, so you can read an athlete at a
@@ -1078,6 +1096,36 @@ const WHITE_MAT = new THREE.MeshLambertMaterial({ color: 0xf0f2f4 });
 const WOOD_MAT = new THREE.MeshLambertMaterial({ color: 0x7a4a26 });
 const DARK_MAT = new THREE.MeshLambertMaterial({ color: 0x23252d });
 const METAL_MAT = new THREE.MeshLambertMaterial({ color: 0xb8bcc4 });
+
+// Keeper kit — lime shirt, dark shorts, white gloves, so the one body per
+// side that may handle the ball reads as the keeper from the halfway line.
+const KEEPER_SHIRT = 0xc8f000;
+const KEEPER_SHORTS_MAT = new THREE.MeshLambertMaterial({ color: 0x1b2030 });
+const GLOVE_MAT = new THREE.MeshLambertMaterial({ color: 0xf6f8fa });
+const GLOVE_GEO = new THREE.BoxGeometry(0.38, 0.44, 0.36);
+
+// Put a rig in (or out of) the keeper kit. Everything here is a swap of
+// references to materials and meshes that already exist — a rig can change
+// role, and allocating a material per frame would leak one per frame.
+// The outfield shirt color needs no restoring: applyCharacter re-sets it from
+// the character immediately before calling this.
+function applyKeeperKit(rig: PlayerRig, keeper: boolean) {
+  rig.keeperKit = keeper;
+  if (keeper) {
+    rig.torsoMat.color.setHex(KEEPER_SHIRT);
+    rig.sleeveMatL.color.setHex(KEEPER_SHIRT);
+    rig.sleeveMatR.color.setHex(KEEPER_SHIRT);
+  }
+  // every body build hands its shorts and hems the shared SHORTS_MAT
+  const from = keeper ? SHORTS_MAT : KEEPER_SHORTS_MAT;
+  const to = keeper ? KEEPER_SHORTS_MAT : SHORTS_MAT;
+  rig.root.traverse(o => {
+    const m = o as THREE.Mesh;
+    if (m.material === from) m.material = to;
+  });
+  rig.gloveL.visible = keeper;
+  rig.gloveR.visible = keeper;
+}
 
 function bodyPart(parent: THREE.Object3D): THREE.Group {
   const g = new THREE.Group();
@@ -1506,30 +1554,19 @@ function makePlayerRig(side: number, intoScene: THREE.Scene = scene3): PlayerRig
   const armL = mkArm(-0.98);
   const armR = mkArm(0.98);
 
-  // racket in the right hand, extending along the forearm
-  const racket = new THREE.Group();
-  racket.position.set(0, -0.95, 0);
-  racket.rotation.x = -0.35;
-  const handle = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.05, 0.05, 0.7, 8),
-    new THREE.MeshLambertMaterial({ color: 0x444444 })
-  );
-  handle.position.y = -0.35;
-  racket.add(handle);
-  const rHead = new THREE.Mesh(
-    new THREE.TorusGeometry(0.5, 0.06, 8, 22),
-    new THREE.MeshLambertMaterial({ color: 0xd8d8e0 })
-  );
-  rHead.position.y = -1.15;
-  rHead.castShadow = true;
-  racket.add(rHead);
-  const strings = new THREE.Mesh(
-    new THREE.CircleGeometry(0.47, 22),
-    new THREE.MeshLambertMaterial({ color: 0xeeeeee, transparent: true, opacity: 0.45, side: THREE.DoubleSide })
-  );
-  strings.position.y = -1.15;
-  racket.add(strings);
-  armR.elbow.add(racket); // permanent — survives body rebuilds
+  // Gloves sit where the athlete build puts its hands. Like the racket they
+  // hang off the joint rather than a body-part wrapper, so a character
+  // rebuild leaves them alone and the kit swap only toggles visibility.
+  const mkGlove = (elbow: THREE.Group) => {
+    const g = new THREE.Mesh(GLOVE_GEO, GLOVE_MAT);
+    g.position.set(0, -0.92, 0.03);
+    g.castShadow = true;
+    g.visible = false;
+    elbow.add(g);
+    return g;
+  };
+  const gloveL = mkGlove(armL.elbow);
+  const gloveR = mkGlove(armR.elbow);
 
   root.rotation.order = 'YZX'; // yaw first, then dive-roll about the local Z
   intoScene.add(root);
@@ -1544,7 +1581,9 @@ function makePlayerRig(side: number, intoScene: THREE.Scene = scene3): PlayerRig
     torsoMat, sleeveMatL, sleeveMatR,
     skinMat, headMat, hairMat, accentMat,
     hairGroup,
+    gloveL, gloveR,
     charId: -1,
+    keeperKit: false,
     head,
     pose: { ...ZERO_POSE },
     yaw: side === 0 ? Math.PI : 0,
@@ -1747,29 +1786,43 @@ function makeGroundTexture(court: number): THREE.CanvasTexture {
   const c = document.createElement('canvas');
   // Half-res surface (and no grain, below) when detail is off — less texture
   // for the GPU to sample on every court pixel.
-  c.width = gfx.detail ? 1024 : 512;
-  c.height = c.width * 1.5; // taller plane (GROUND_EXT_Y), same texel density
+  // The canvas is a plain top-down chart of the bowl floor: canvas x runs
+  // ALONG the pitch (three-x), canvas y ACROSS it (three-z). Both helpers
+  // still take world coords — wx across, wy along — so every drawing call
+  // below reads in pitch terms and needs no transposing of its own.
+  // The chart covers only ±GROUND_WID across; the plane runs on to
+  // ±GROUND_EXT and clamps to this edge (see buildEnvironment), which is
+  // plain outfield grass, so none of the texture is spent on ground nobody
+  // can see past the hoardings.
+  c.width = gfx.detail ? 2048 : 1024;
+  c.height = Math.round((c.width * GROUND_WID) / GROUND_LEN); // square texels
   const g = c.getContext('2d')!;
-  const toU = (wx: number) => ((wx + GROUND_X) / (2 * GROUND_X)) * c.width;
-  const toV = (wy: number) => ((GROUND_EXT_Y - wy) / (2 * GROUND_EXT_Y)) * c.height;
+  const PX = c.width / (2 * GROUND_LEN); // canvas pixels per world unit
+  const toU = (wy: number) => (wy + GROUND_LEN) * PX;
+  const toV = (wx: number) => (wx + GROUND_WID) * PX;
+  const span = (n: number) => n * PX;
 
   g.fillStyle = surf.outer;
   g.fillRect(0, 0, c.width, c.height);
 
   if (surf.stripe) {
-    const STRIPE = 9.75;
-    let i = 0;
-    for (let y = -GROUND_EXT_Y; y < GROUND_EXT_Y; y += STRIPE, i++) {
-      g.fillStyle = i % 2 === 0 ? surf.inner : surf.outer;
-      g.fillRect(0, toV(Math.min(y + STRIPE, GROUND_EXT_Y)), c.width, toV(y) - toV(Math.min(y + STRIPE, GROUND_EXT_Y)));
+    // Mowing bands run ACROSS the pitch: side-on that reads as vertical
+    // stripes crossing the screen, which is the broadcast look. Anchoring
+    // them on multiples of STRIPE puts a seam on the halfway line and on
+    // both goal lines.
+    const STRIPE = PITCH_HALF_LEN / 7; // 14 bands between the goal lines
+    for (let i = -Math.ceil(GROUND_LEN / STRIPE); i * STRIPE < GROUND_LEN; i++) {
+      g.fillStyle = (((i % 2) + 2) % 2) === 0 ? surf.inner : surf.outer;
+      const u0 = toU(i * STRIPE);
+      g.fillRect(u0, 0, toU((i + 1) * STRIPE) - u0, c.height);
     }
   } else {
     const mx = PITCH_HALF_WID + 6;
     const my = PITCH_HALF_LEN + 8;
     g.fillStyle = surf.inner;
-    g.fillRect(toU(-mx), toV(my), toU(mx) - toU(-mx), toV(-my) - toV(my));
+    g.fillRect(toU(-my), toV(-mx), toU(my) - toU(-my), toV(mx) - toV(-mx));
   }
-  for (let n = 0; gfx.detail && n < 9000; n++) {
+  for (let n = 0; gfx.detail && n < 14000; n++) {
     const s = Math.sin(n * 127.1) * 43758.5453;
     const r = s - Math.floor(s);
     const s2 = Math.sin(n * 311.7) * 12543.21;
@@ -1781,39 +1834,39 @@ function makeGroundTexture(court: number): THREE.CanvasTexture {
   const hw = PITCH_HALF_WID;
   const hl = PITCH_HALF_LEN;
 
-  // baked ambient falloff toward the hoardings grounds the court in the bowl
-  for (const [gy0, gy1, ry] of [
-    [0, c.height * 0.2, 0],
-    [c.height, c.height * 0.8, c.height * 0.8],
-  ] as const) {
-    const vg = g.createLinearGradient(0, gy0, 0, gy1);
+  // baked ambient falloff toward the hoardings grounds the pitch in the bowl
+  for (const s of [1, -1]) {
+    const v0 = toV(s * GROUND_WID);
+    const v1 = toV(s * (hw - 6));
+    const vg = g.createLinearGradient(0, v0, 0, v1);
     vg.addColorStop(0, 'rgba(0,0,20,0.14)');
     vg.addColorStop(1, 'rgba(0,0,20,0)');
     g.fillStyle = vg;
-    g.fillRect(0, ry, c.width, c.height * 0.2);
+    g.fillRect(0, Math.min(v0, v1), c.width, Math.abs(v1 - v0));
   }
-  for (const [gx0, gx1, rx] of [
-    [0, c.width * 0.14, 0],
-    [c.width, c.width * 0.86, c.width * 0.86],
-  ] as const) {
-    const vg = g.createLinearGradient(gx0, 0, gx1, 0);
-    vg.addColorStop(0, 'rgba(0,0,20,0.10)');
-    vg.addColorStop(1, 'rgba(0,0,20,0)');
-    g.fillStyle = vg;
-    g.fillRect(rx, 0, c.width * 0.14, c.height);
+  for (const s of [1, -1]) {
+    const u0 = toU(s * GROUND_LEN);
+    const u1 = toU(s * (hl - 8));
+    const hg = g.createLinearGradient(u0, 0, u1, 0);
+    hg.addColorStop(0, 'rgba(0,0,20,0.10)');
+    hg.addColorStop(1, 'rgba(0,0,20,0)');
+    g.fillStyle = hg;
+    g.fillRect(Math.min(u0, u1), 0, Math.abs(u1 - u0), c.height);
   }
 
   // the grass dies in the goalmouths and around the penalty spots — the two
   // patches of a five-a-side pitch that never get a rest
   if (court !== 2) {
     for (const gs of [1, -1]) {
-      for (const [wy, rx, ry, a] of [
+      for (const [wy, rAcross, rAlong, a] of [
         [gs * (hl - 1.5), GOAL_HALF_W + 1.5, 3.2, 0.09],
         [gs * (hl - BOX_DEPTH + 3), 4.5, 2.4, 0.06],
       ] as const) {
         g.fillStyle = `rgba(196,180,120,${a})`;
         g.beginPath();
-        g.ellipse(toU(0), toV(wy), toU(rx) - toU(0), toV(0) - toV(ry), 0, 0, Math.PI * 2);
+        // the patch is wide across the goal and shallow along the pitch, so
+        // the along radius drives canvas x and the across radius canvas y
+        g.ellipse(toU(wy), toV(0), span(rAlong), span(rAcross), 0, 0, Math.PI * 2);
         g.fill();
       }
     }
@@ -1824,14 +1877,14 @@ function makeGroundTexture(court: number): THREE.CanvasTexture {
     g.lineWidth = 3;
     for (let wy = -hl - 6; wy <= hl + 6; wy += 13) {
       g.beginPath();
-      g.moveTo(toU(-hw - 6), toV(wy));
-      g.lineTo(toU(hw + 6), toV(wy));
+      g.moveTo(toU(wy), toV(-hw - 6));
+      g.lineTo(toU(wy), toV(hw + 6));
       g.stroke();
     }
     for (let wx = -hw - 6; wx <= hw + 6; wx += 13) {
       g.beginPath();
-      g.moveTo(toU(wx), toV(-hl - 6));
-      g.lineTo(toU(wx), toV(hl + 6));
+      g.moveTo(toU(-hl - 6), toV(wx));
+      g.lineTo(toU(hl + 6), toV(wx));
       g.stroke();
     }
     g.strokeStyle = 'rgba(255,255,255,0.06)';
@@ -1844,39 +1897,44 @@ function makeGroundTexture(court: number): THREE.CanvasTexture {
       const s3 = Math.sin(n * 137.9) * 33421.13;
       const ang = (s3 - Math.floor(s3)) * Math.PI * 2;
       g.beginPath();
-      g.moveTo(toU(wx), toV(wy));
-      g.lineTo(toU(wx + Math.cos(ang) * 2.6), toV(wy + Math.sin(ang) * 1.4));
+      g.moveTo(toU(wy), toV(wx));
+      g.lineTo(toU(wy + Math.sin(ang) * 1.4), toV(wx + Math.cos(ang) * 2.6));
       g.stroke();
     }
   }
 
   g.lineCap = 'square';
+  // All three take world coords (x across, y along) and place them on the
+  // transposed chart, so the markings below are written in pitch terms.
   const line = (x1: number, y1: number, x2: number, y2: number, ox = 0, oy = 0) => {
     g.beginPath();
-    g.moveTo(toU(x1) + ox, toV(y1) + oy);
-    g.lineTo(toU(x2) + ox, toV(y2) + oy);
+    g.moveTo(toU(y1) + ox, toV(x1) + oy);
+    g.lineTo(toU(y2) + ox, toV(x2) + oy);
     g.stroke();
   };
   const arc = (
     cx: number, cy: number, r: number, a0: number, a1: number, ox: number, oy: number
   ) => {
     g.beginPath();
-    // canvas y grows downward while world y grows upward, so sweeping
-    // counter-clockwise on screen draws a clockwise world arc
+    // World angles run from +x (across) toward +y (along). The chart puts
+    // along on canvas x and across on canvas y, so a world angle θ lands at
+    // canvas angle π/2 − θ and the sweep reverses with it.
     g.ellipse(
-      toU(cx) + ox, toV(cy) + oy,
-      toU(r) - toU(0), toV(0) - toV(r),
-      0, -a1, -a0
+      toU(cy) + ox, toV(cx) + oy,
+      span(r), span(r),
+      0, Math.PI / 2 - a1, Math.PI / 2 - a0
     );
     g.stroke();
   };
   const dot = (cx: number, cy: number, ox: number, oy: number) => {
     g.beginPath();
-    g.ellipse(toU(cx) + ox, toV(cy) + oy, toU(0.45) - toU(0), toV(0) - toV(0.45), 0, 0, Math.PI * 2);
+    g.ellipse(toU(cy) + ox, toV(cx) + oy, span(0.45), span(0.45), 0, 0, Math.PI * 2);
     g.fill();
   };
-  const SIX_DEPTH = BOX_DEPTH * 0.42; // six-yard box
-  const SIX_HALF_W = GOAL_HALF_W + 2.5;
+  // Real proportions off the goal: the six-yard box is 5.5 m deep against the
+  // penalty area's 16.5, and reaches 1.5 goal-half-widths past each post.
+  const SIX_DEPTH = BOX_DEPTH * 0.33;
+  const SIX_HALF_W = GOAL_HALF_W + 6;
   const PEN_SPOT = BOX_DEPTH * 0.62;
   const paintLines = (ox: number, oy: number) => {
     // touchlines + goal lines
@@ -1910,19 +1968,31 @@ function makeGroundTexture(court: number): THREE.CanvasTexture {
       }
     }
   };
-  // soft baked shadow under the paint lifts the markings off the surface
+  // Paint is a fixed WIDTH ON THE GROUND (about 11 cm at this scale), so it
+  // is derived from the texel density rather than fixed in pixels — the
+  // half-res texture then draws the same lines, not fatter ones.
+  const LW = Math.max(2, span(0.36));
+  // the shadow falls with the sun (far side, over the far touchline): down
+  // the canvas is toward the camera, right is up the pitch
   g.strokeStyle = 'rgba(0,10,0,0.22)';
   g.fillStyle = 'rgba(0,10,0,0.22)';
-  g.lineWidth = 6;
-  paintLines(2, 3);
+  g.lineWidth = LW * 1.5;
+  paintLines(span(0.2), span(0.3));
   g.strokeStyle = '#fafafa';
   g.fillStyle = '#fafafa';
-  g.lineWidth = 4;
+  g.lineWidth = LW;
   paintLines(0, 0);
 
   const tex = new THREE.CanvasTexture(c);
   tex.anisotropy = gfx.detail ? 8 : 1;
   tex.colorSpace = THREE.SRGBColorSpace;
+  // The plane is GROUND_EXT deep but this chart only covers GROUND_WID; the
+  // rest of the plane clamps to the outfield grass at its edge.
+  tex.wrapS = THREE.ClampToEdgeWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  const kv = GROUND_EXT / GROUND_WID;
+  tex.repeat.set(1, kv);
+  tex.offset.set(0, (1 - kv) / 2);
   return tex;
 }
 
@@ -2231,7 +2301,7 @@ const STAND_H = 34;
 // sections, so the arena closes into a seamless ring instead of four
 // floating walls with sky gaps at the corners.
 function bowlEdges() {
-  const A = GROUND_X, B = GROUND_Y, cut = 24;
+  const A = GROUND_LEN, B = GROUND_WID, cut = 24;
   const pts: [number, number][] = [
     [-A + cut, -B], [A - cut, -B], [A, -B + cut], [A, B - cut],
     [A - cut, B], [-A + cut, B], [-A, B - cut], [-A, -B + cut],
@@ -2258,7 +2328,10 @@ function scaleUv(geo: THREE.BufferGeometry, kx: number, ky = 1) {
 function buildEnvironment() {
   crowdStands = [];
   groundMat = new THREE.MeshLambertMaterial();
-  const ground = new THREE.Mesh(new THREE.PlaneGeometry(GROUND_X * 2, GROUND_EXT_Y * 2), groundMat);
+  const ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(GROUND_LEN * 2, GROUND_EXT * 2),
+    groundMat
+  );
   ground.rotation.x = -Math.PI / 2;
   ground.receiveShadow = true;
   scene3.add(ground);
@@ -2266,8 +2339,8 @@ function buildEnvironment() {
   // --- goals: white frame, sagging net, stanchions. One at each end; the
   // ball crosses the line at |y| = PITCH_HALF_LEN, so the frame sits there
   // and the netting hangs behind it. ---------------------------------------
-  // The near goal fills a lot of frame, so the netting has to be something
-  // you see the pitch THROUGH, not a wall across the bottom of the screen.
+  // Side-on both goals are in shot at once, so the netting has to be
+  // something you see the pitch THROUGH, not a wall across the screen.
   const netMat = new THREE.MeshLambertMaterial({
     map: makeNetTexture(),
     transparent: true,
@@ -2281,8 +2354,12 @@ function buildEnvironment() {
   const NET_DEPTH = 5.5; // how far the net is pulled back behind the line
   for (const gs of [1, -1]) {
     const goal = new THREE.Group();
-    // three.js z = -world y, so a goal at world y = gs*HALF_LEN sits at -gs*…
-    goal.position.set(0, 0, -gs * PITCH_HALF_LEN);
+    // The pitch runs along three-x, so a goal at world y = gs*HALF_LEN stands
+    // at three-x = gs*HALF_LEN turned a quarter turn to face inward. Every
+    // child then works in one local frame: +x across the mouth, +z BEHIND the
+    // goal, whichever end this is.
+    goal.position.set(gs * PITCH_HALF_LEN, 0, 0);
+    goal.rotation.y = (gs * Math.PI) / 2;
     scene3.add(goal);
 
     for (const px of [-GOAL_HALF_W, GOAL_HALF_W]) {
@@ -2304,13 +2381,14 @@ function buildEnvironment() {
     goal.add(bar);
 
     // back stanchions, leaning away from the pitch
+    const lean = -Math.atan2(NET_DEPTH, GOAL_HEIGHT);
     for (const px of [-GOAL_HALF_W, GOAL_HALF_W]) {
       const stay = new THREE.Mesh(
         new THREE.CylinderGeometry(POST_R * 0.6, POST_R * 0.6, Math.hypot(GOAL_HEIGHT, NET_DEPTH), 8),
         frameMat
       );
-      stay.position.set(px, GOAL_HEIGHT / 2, -gs * NET_DEPTH / 2);
-      stay.rotation.x = gs * Math.atan2(NET_DEPTH, GOAL_HEIGHT);
+      stay.position.set(px, GOAL_HEIGHT / 2, NET_DEPTH / 2);
+      stay.rotation.x = lean;
       goal.add(stay);
     }
 
@@ -2320,17 +2398,17 @@ function buildEnvironment() {
       netMat
     );
     // tilted so its top edge meets the crossbar and its foot the net's back
-    back.position.set(0, GOAL_HEIGHT / 2, -gs * NET_DEPTH / 2);
-    back.rotation.x = gs * Math.atan2(NET_DEPTH, GOAL_HEIGHT);
+    back.position.set(0, GOAL_HEIGHT / 2, NET_DEPTH / 2);
+    back.rotation.x = lean;
     goal.add(back);
     const roof = new THREE.Mesh(new THREE.PlaneGeometry(GOAL_HALF_W * 2, NET_DEPTH), netMat);
     roof.rotation.x = -Math.PI / 2;
-    roof.position.set(0, GOAL_HEIGHT, -gs * NET_DEPTH / 2);
+    roof.position.set(0, GOAL_HEIGHT, NET_DEPTH / 2);
     goal.add(roof);
     for (const px of [-GOAL_HALF_W, GOAL_HALF_W]) {
       const sideNet = new THREE.Mesh(new THREE.PlaneGeometry(NET_DEPTH, GOAL_HEIGHT), netMat);
       sideNet.rotation.y = Math.PI / 2;
-      sideNet.position.set(px, GOAL_HEIGHT / 2, -gs * NET_DEPTH / 2);
+      sideNet.position.set(px, GOAL_HEIGHT / 2, NET_DEPTH / 2);
       goal.add(sideNet);
     }
   }
@@ -2356,8 +2434,9 @@ function buildEnvironment() {
   scene3.add(detailGroup);
 
   // --- stands: tilted crowd tiers rising from the hoarding tops, with a
-  // roof + fascia. The near stand is kept low (and roofless) so it never
-  // pokes into the bottom of the frame; its corner neighbors step down to
+  // roof + fascia. Edge 4 is the camera-side touchline (three-z = +WID): the
+  // rail flies above it, so that stand is kept low and roofless or it would
+  // sit across the bottom of every frame. Its corner neighbours step down to
   // meet it. -----------------------------------------------------------
   const cMatA = (crowdMatA = new THREE.MeshLambertMaterial({ map: makeCrowdTexture(0) }));
   const cMatB = (crowdMatB = new THREE.MeshLambertMaterial({ map: makeCrowdTexture(1) }));
@@ -2401,8 +2480,10 @@ function buildEnvironment() {
     }
   });
 
-  // --- jumbotron above the far stand --------------------------------------
+  // --- jumbotron, up in a far corner. Dead centre of frame is the worst
+  // place for it: side-on that is exactly where the play is. ---------------
   const jumbo = new THREE.Group();
+  jumbo.rotation.order = 'YXZ';
   const jFrame = new THREE.Mesh(
     new THREE.BoxGeometry(29.6, 11.4, 1),
     new THREE.MeshLambertMaterial({ color: 0x141a2e })
@@ -2420,23 +2501,28 @@ function buildEnvironment() {
     leg.position.set(lx, -8, -0.4);
     jumbo.add(leg);
   }
-  jumbo.position.set(0, 35.5, -88);
-  jumbo.rotation.x = 0.1; // faces down at the court
+  jumbo.position.set(-64, 33, -50);
+  jumbo.rotation.y = Math.atan2(64, 50); // angled back at the middle
+  jumbo.rotation.x = 0.1; // faces down at the pitch
   detailGroup.add(jumbo);
 
   // --- floodlight towers at the four corners ------------------------------
   const poleMat = new THREE.MeshLambertMaterial({ color: 0x8a929e });
   const headMat = new THREE.MeshLambertMaterial({ color: 0x3a4148 });
   const lampMat = new THREE.MeshBasicMaterial({ color: 0xf0f7ff }); // self-lit
+  const towerH = PITCH_HALF_WID * 1.15;
   for (const sx of [-1, 1]) {
     for (const sz of [-1, 1]) {
-      const px = sx * 53;
-      const pz = sz * 59;
-      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.75, 39, 10), poleMat);
-      pole.position.set(px, 19.5, pz);
+      const px = sx * (GROUND_LEN - 4);
+      const pz = sz * (GROUND_WID - 4);
+      const pole = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.5, 0.75, towerH, 10),
+        poleMat
+      );
+      pole.position.set(px, towerH / 2, pz);
       detailGroup.add(pole);
       const head = new THREE.Group();
-      head.position.set(px, 39.5, pz);
+      head.position.set(px, towerH, pz);
       head.rotation.order = 'YXZ';
       head.rotation.y = Math.atan2(-px, -pz); // aimed at center court
       head.rotation.x = 0.45;
@@ -2449,11 +2535,12 @@ function buildEnvironment() {
     }
   }
 
-  // --- dugouts: the two benches down the touchline ------------------------
+  // --- dugouts: the two benches in the technical area, on the CAMERA side of
+  // the pitch, where television actually sees them ------------------------
   const benchSeatMat = new THREE.MeshLambertMaterial({ color: 0x2e6cb0 });
   const benchLegMat = new THREE.MeshLambertMaterial({ color: 0x9aa4b0 });
   const towelMat = new THREE.MeshLambertMaterial({ color: 0xf6f6f2 });
-  for (const bz of [-13, 13]) {
+  for (const bz of [-14, 14]) {
     const bench = new THREE.Group();
     const seatB = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.3, 6), benchSeatMat);
     seatB.position.y = 1.5;
@@ -2471,7 +2558,10 @@ function buildEnvironment() {
     const towel = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.1, 1.5), towelMat);
     towel.position.set(0, 1.7, bz > 0 ? -1.6 : 1.6);
     bench.add(towel);
-    bench.position.set(GROUND_X - 25, 0, bz);
+    // the bench is modelled long along its local z with its back at local +x,
+    // so a quarter turn lays it along the touchline facing the pitch
+    bench.position.set(bz * 2.2, 0, PITCH_HALF_WID + 4);
+    bench.rotation.y = -Math.PI / 2;
     detailGroup.add(bench);
   }
 
@@ -2531,41 +2621,46 @@ function buildScene() {
 
   scene3 = new THREE.Scene();
   scene3.background = makeSkyTexture();
-  scene3.fog = new THREE.Fog(0xdce8f2, 200, 340);
+  // Side-on the far stand is only ~130 units off, so the haze has to start
+  // inside the pitch to read at all.
+  scene3.fog = new THREE.Fog(0xdce8f2, 90, 260);
 
   // resizeToDisplay corrects this on the first frame; the fallback only
   // covers a canvas that has not been laid out yet.
   const aspect =
     hostCanvas.clientHeight > 0 ? hostCanvas.clientWidth / hostCanvas.clientHeight : BASE_ASPECT;
-  camera = new THREE.PerspectiveCamera(46, aspect, 1, 400);
-  camera.position.copy(CAM_POS);
-  camera.lookAt(CAM_TARGET);
+  camera = new THREE.PerspectiveCamera(CAM_FOV, aspect, 0.8, 300);
+  camReady = false; // updateBroadcastCamera snaps onto the play on frame one
 
   sun = new THREE.DirectionalLight(0xfff2df, 2.2); // late-afternoon warmth
-  sun.position.set(-40, 70, 30);
-  sun.shadow.camera.left = -70;
-  sun.shadow.camera.right = 70;
-  sun.shadow.camera.top = 80;
-  sun.shadow.camera.bottom = -80;
-  sun.shadow.camera.far = 250;
+  // over the FAR touchline: players are rim-lit and their shadows fall
+  // toward the camera, which is what reads as depth side-on
+  sun.position.set(-30, 70, -55);
+  // the box is in light space, and the pitch is long: ±100 along, ±60 across
+  sun.shadow.camera.left = -100;
+  sun.shadow.camera.right = 100;
+  sun.shadow.camera.top = 60;
+  sun.shadow.camera.bottom = -60;
+  sun.shadow.camera.far = 320;
   scene3.add(sun);
   scene3.add(new THREE.HemisphereLight(0xcfe4ff, 0x3a6b32, 1.0));
 
   buildEnvironment();
   initParticles();
 
-  // six rigs: slots 0/1 are each side's first player (singles uses only
-  // these), slots 2/3 the doubles partners and 4/5 the third teammates in
-  // 3v3 (rigSlot = side + teamSlot*2)
-  playerRigs = [0, 1, 0, 1, 0, 1].map(side => makePlayerRig(side));
+  // Ten rigs, one per seat: slots 0-4 are side 0, slots 5-9 side 1, and the
+  // last seat of each (KEEPER_RIG_SEAT in config.ts) is that side's keeper.
+  playerRigs = Array.from({ length: RIG_COUNT }, (_, i) =>
+    makePlayerRig(Math.floor(i / SQUAD_SIZE))
+  );
   playerRigs.forEach((rig, i) => {
     rig.root.visible = false;
-    rig.runSeed = i * 2.7; // desync the partners' idle/run cycles
+    rig.runSeed = i * 2.7; // desync the teammates' idle/run cycles
     rig.runPhase = i * 2.7;
   });
 
   ballMesh = new THREE.Mesh(
-    new THREE.SphereGeometry(0.55, 20, 16),
+    new THREE.SphereGeometry(BALL_RADIUS, 20, 16),
     new THREE.MeshLambertMaterial({ map: makeBallTexture(), color: COLORS.ball })
   );
   ballMesh.castShadow = true;
@@ -2573,12 +2668,23 @@ function buildScene() {
   scene3.add(ballMesh);
 
   ballBlob = new THREE.Mesh(
-    new THREE.CircleGeometry(0.6, 16),
+    new THREE.CircleGeometry(BALL_RADIUS + 0.05, 16),
     new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.3 })
   );
   ballBlob.rotation.x = -Math.PI / 2;
   ballBlob.visible = false;
   scene3.add(ballBlob);
+
+  // Side-on, height is the one thing perspective hides: a ball six units up
+  // and a ball on the deck project to nearly the same place. A hairline from
+  // the ball down to its blob is what makes a chip read as a chip.
+  ballDrop = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+    new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.28 })
+  );
+  ballDrop.visible = false;
+  ballDrop.frustumCulled = false;
+  scene3.add(ballDrop);
 
   for (let i = 0; i < 7; i++) {
     const t = new THREE.Mesh(
@@ -2723,6 +2829,264 @@ function disposeScene() {
 }
 
 // ---------------------------------------------------------------------------
+// Broadcast camera: a rail along the near touchline
+// ---------------------------------------------------------------------------
+// Football is watched side-on from a gantry above the main stand. The body
+// TRUCKS along the touchline more slowly than the head PANS, and the boom
+// dollies in and out to hold the play in shot. Every distance here is a
+// fraction of the pitch, so changing the geometry constants carries the whole
+// framing with it.
+const CAM_ELEV = THREE.MathUtils.degToRad(33);
+const CAM_SIN = Math.sin(CAM_ELEV);
+const CAM_COS = Math.cos(CAM_ELEV);
+const CAM_FOV = 36;
+const K_TRUCK = 0.72; // body pans slower than head: 1.0 would be a turntable
+const S_LIMIT = PITCH_HALF_LEN * 0.65; // the rail stops short of the goal ends
+const R_DEFAULT = PITCH_HALF_LEN * 1.14;
+const R_MIN = PITCH_HALF_LEN * 0.95;
+const R_MAX = PITCH_HALF_LEN * 1.4;
+// The aim sits a little toward the camera's own touchline: that is what sets
+// the horizon and keeps the near touchline off the bottom edge of the frame.
+const CAM_AIM_W = PITCH_HALF_WID * 0.28;
+const CAM_AIM_Y = 1.6;
+// Past this the aim did not move, it TELEPORTED (a restart spot the far side
+// of the pitch, the cut back from a replay). Easing across it would sweep the
+// whole ground, so snap.
+const SNAP_DIST = 22;
+// SHOOT_RANGE in spacetimedb/src/index.ts. The module re-aims a forward kick
+// at the goal mouth inside this radius, so the mouth has to be on screen for
+// as long as that assist is armed — otherwise you cannot see what you are
+// shooting at. Not in config.ts; keep the two in step by hand.
+const SHOOT_RANGE = 34;
+const PAD_H = 8; // world units of margin outside the outermost interest point
+const PAD_V = 6; // ... vertically, which also has to cover a standing body
+const GOAL_PUNCH_MS = 700;
+
+let camS = 0; // where the body stands on the rail (three-x)
+let aimS = 0; // where the head is pointed, along the pitch
+let aimW = CAM_AIM_W; // ... and across it
+let camR = R_DEFAULT; // boom length
+let camReady = false; // first live frame snaps rather than sweeping in from 0
+let goalPunchAt = -1;
+let prevCamPhase = -1;
+
+// At most eight points must be in shot; the array is reused so a 60 Hz
+// camera allocates nothing.
+const INTEREST_MAX = 8;
+const interest: THREE.Vector3[] = Array.from(
+  { length: INTEREST_MAX },
+  () => new THREE.Vector3()
+);
+let interestN = 0;
+const pushInterest = (x: number, y: number, z: number) => {
+  if (interestN < INTEREST_MAX) interest[interestN++].set(x, y, z);
+};
+const _camF = new THREE.Vector3();
+const _camRt = new THREE.Vector3();
+const _camU = new THREE.Vector3();
+const _camAim = new THREE.Vector3();
+const _camEye = new THREE.Vector3();
+const _camD = new THREE.Vector3();
+
+// Shake is applied AFTER lookAt, as a LOCAL rotation. Displacing the eye and
+// the look-at target together — what this used to do — mostly cancels into a
+// dolly, which is why goals felt soft; on a tracking camera it would also
+// feed straight back into the smoothing.
+function applyShake(now: number) {
+  if (shakeAmp < 0.005) return;
+  const s1 = (Math.sin(now * 0.081) + Math.sin(now * 0.023)) * 0.5 * shakeAmp;
+  const s2 = (Math.sin(now * 0.097 + 2) + Math.sin(now * 0.031 + 1)) * 0.5 * shakeAmp;
+  camera.rotateX(s2 * 0.018);
+  camera.rotateY(s1 * 0.018);
+  camera.rotateZ(s1 * 0.01);
+}
+
+function updateBroadcastCamera(scene: Scene, dt: number, now: number) {
+  const { flip, ball } = scene;
+
+  // --- REPLAY: low and behind the goal that was attacked. Cutting from a 33°
+  // side rail to a 9° goal-end shot is a real edit, and it is what sells the
+  // goal — a replay on the live rig is just the same shot again. -----------
+  if (scene.replayCam) {
+    const fov = fovForAspect(40);
+    if (Math.abs(camera.fov - fov) > 0.05) {
+      camera.fov = fov;
+      camera.updateProjectionMatrix();
+    }
+    const sgn = ball && ball.y * flip < 0 ? -1 : 1;
+    camera.position.set(sgn * (PITCH_HALF_LEN + 16), 7.5, 13);
+    const bt = ball ? toThree(flip, ball.x, ball.y, Math.min(ball.z, 12)) : null;
+    if (bt) {
+      if (!replayLook) replayLook = bt.clone();
+      else replayLook.lerp(bt, 1 - Math.exp(-6 * dt));
+    } else if (!replayLook) {
+      replayLook = new THREE.Vector3(0, 2.5, 0);
+    }
+    camera.lookAt(replayLook);
+    camera.updateMatrixWorld();
+    camReady = false; // the cut back to live snaps; it does not sweep
+    prevCamPhase = scene.phase;
+    return;
+  }
+  replayLook = null;
+
+  const fovV = fovForAspect(CAM_FOV);
+  if (Math.abs(camera.fov - fovV) > 0.05) {
+    camera.fov = fovV;
+    camera.updateProjectionMatrix();
+  }
+
+  // The play, in camera coordinates: s along the pitch, w across it.
+  const bs = ball ? ball.y * flip : 0;
+  const bw = ball ? ball.x * flip : 0;
+
+  // Look-ahead comes from POSSESSION, not velocity. The ball sticks to its
+  // owner and is knocked ahead of his run, so a dribbled ball's velocity
+  // snaps between stride and knock-on every few ticks — leading on it would
+  // jitter the entire frame at 30 Hz. In possession, lead a fixed distance
+  // the way the carrier is attacking instead.
+  const leadS = !ball
+    ? 0
+    : ball.hasOwner
+      ? 6 * attackDir(ball.ownerSide ?? 0, flip)
+      : THREE.MathUtils.clamp(ball.vy * flip * 0.3, -11, 11);
+
+  // --- state ---------------------------------------------------------------
+  // A goal is the frame the phase flips to PAUSE for a kick-off restart.
+  if (
+    scene.phase === PHASE_PAUSE &&
+    prevCamPhase !== PHASE_PAUSE &&
+    scene.restartKind === RK_KICKOFF
+  ) {
+    goalPunchAt = now;
+  }
+  prevCamPhase = scene.phase;
+  const punch = goalPunchAt >= 0 && now - goalPunchAt < GOAL_PUNCH_MS;
+  if (!punch) goalPunchAt = -1;
+  const restart = !punch && scene.phase !== PHASE_LIVE;
+  const spectating = scene.focusSlot === undefined;
+
+  let tgtS = bs + (restart ? 0 : leadS);
+  let tgtW = bw;
+  if (punch) {
+    // the scorer, not the ball: the ball is already in the back of the net
+    const sc =
+      scene.strikerRigSlot === undefined
+        ? undefined
+        : scene.players.find(p => (p.rigSlot ?? p.side * SQUAD_SIZE) === scene.strikerRigSlot);
+    if (sc) {
+      tgtS = sc.y * flip;
+      tgtW = sc.x * flip;
+    }
+  } else if (spectating) {
+    // nobody to follow through a goalless spell: drift, so 0-0 is not a
+    // frozen frame
+    tgtS += Math.sin(now / 4200) * 3;
+  }
+
+  // --- ease, or snap when the aim jumped -----------------------------------
+  const jump = !camReady || Math.abs(tgtS - aimS) > SNAP_DIST;
+  if (jump) {
+    aimS = tgtS;
+  } else {
+    // 2-unit deadzone: a ball shuffling at someone's feet must not drag the
+    // whole ground with it
+    const d = tgtS - aimS;
+    if (Math.abs(d) > 2) {
+      const want = tgtS - Math.sign(d) * 2;
+      aimS += (want - aimS) * (1 - Math.exp(-7.5 * dt));
+    }
+  }
+  const wantW = CAM_AIM_W + THREE.MathUtils.clamp(tgtW * 0.35, -7, 7);
+  aimW = jump ? wantW : aimW + (wantW - aimW) * (1 - Math.exp(-4 * dt));
+  const truck = THREE.MathUtils.clamp(K_TRUCK * aimS, -S_LIMIT, S_LIMIT);
+  camS = jump ? truck : camS + (truck - camS) * (1 - Math.exp(-3.2 * dt));
+  camReady = true;
+
+  // --- the points that must be in shot -------------------------------------
+  interestN = 0;
+  pushInterest(aimS, CAM_AIM_Y, aimW);
+  if (ball) pushInterest(bs, Math.min(ball.z, 14), bw);
+  if (ball) {
+    const gsn = bs >= 0 ? 1 : -1;
+    const toGoal = Math.hypot(gsn * PITCH_HALF_LEN - bs, bw);
+    const goalward =
+      ball.vy * flip * gsn > 1 ||
+      (ball.hasOwner && attackDir(ball.ownerSide ?? 0, flip) === gsn);
+    // A corner is framed with the flag (which is where the ball sits) AND the
+    // near post, so you can read the delivery.
+    if (restart && scene.restartKind === RK_CORNER) {
+      pushInterest(gsn * PITCH_HALF_LEN, GOAL_HEIGHT * 0.6, Math.sign(bw || 1) * GOAL_HALF_W);
+    } else if (toGoal < SHOOT_RANGE && goalward) {
+      pushInterest(gsn * PITCH_HALF_LEN, GOAL_HEIGHT * 0.6, GOAL_HALF_W);
+      pushInterest(gsn * PITCH_HALF_LEN, GOAL_HEIGHT * 0.6, -GOAL_HALF_W);
+    }
+  }
+  const focus =
+    scene.focusSlot === undefined
+      ? undefined
+      : scene.players.find(p => (p.rigSlot ?? p.side * SQUAD_SIZE) === scene.focusSlot);
+  if (focus) pushInterest(focus.y * flip, 3, focus.x * flip);
+  if (ball) {
+    for (const pl of scene.players) {
+      if (pl === focus || pl.role === ROLE_KEEPER) continue;
+      if (Math.hypot(pl.x - ball.x, pl.y - ball.y) > 30) continue;
+      pushInterest(pl.y * flip, 3, pl.x * flip);
+    }
+  }
+
+  // --- dolly to fit (constant FOV, moving boom, so perspective and horizon
+  // stay put and fovForAspect keeps its one job) ---------------------------
+  _camAim.set(aimS, CAM_AIM_Y, aimW);
+  _camEye.set(camS, CAM_AIM_Y + camR * CAM_SIN, aimW + camR * CAM_COS);
+  _camF.copy(_camAim).sub(_camEye).normalize();
+  _camRt.copy(_camF).cross(_UP).normalize();
+  _camU.copy(_camRt).cross(_camF);
+  const tanV = Math.tan(THREE.MathUtils.degToRad(fovV / 2));
+  const tanH = tanV * camera.aspect;
+  let rNeed = R_MIN;
+  for (let i = 0; i < interestN; i++) {
+    _camD.copy(interest[i]).sub(_camAim);
+    const a = Math.abs(_camD.dot(_camRt));
+    const b = Math.abs(_camD.dot(_camU));
+    // depth relative to the aim: a point BEYOND it sits in a wider slice of
+    // the frustum and needs less boom, one this side of it needs more. That
+    // term is what makes a near-touchline body actually fit rather than clip.
+    const c = _camD.dot(_camF);
+    const need = Math.max((a + PAD_H) / tanH, (b + PAD_V) / tanV) - c;
+    if (need > rNeed) rNeed = need;
+  }
+  // On the goal line the mouth is the thing worth seeing: push in.
+  const boxIn = THREE.MathUtils.clamp(
+    (Math.abs(aimS) - (PITCH_HALF_LEN - BOX_DEPTH)) / BOX_DEPTH,
+    0,
+    1
+  );
+  rNeed *= 1 - 0.14 * boxIn;
+  if (restart) rNeed = Math.max(rNeed, R_DEFAULT * 1.12); // a restart is read wide
+  if (punch) rNeed *= 0.72;
+  rNeed = THREE.MathUtils.clamp(rNeed, R_MIN, R_MAX);
+  // Widen FAST so the play is never lost, tighten SLOWLY so the frame does
+  // not pump on a dribble. The asymmetry is the whole trick.
+  const rk = punch ? 9 : rNeed > camR ? 5.5 : 2.2;
+  camR = jump ? rNeed : camR + (rNeed - camR) * (1 - Math.exp(-rk * dt));
+
+  camera.position.set(camS, CAM_AIM_Y + camR * CAM_SIN, aimW + camR * CAM_COS);
+  camera.lookAt(aimS, CAM_AIM_Y, aimW);
+  // Portrait: the widened frame would spend the extra height on sky, so pitch
+  // down through part of the gained angle and let the foreground (where the
+  // touch controls sit) take the slack.
+  if (fovV > CAM_FOV) {
+    camera.rotateX(-THREE.MathUtils.degToRad((fovV - CAM_FOV) * 0.14));
+  }
+  applyShake(now);
+  // Nameplates and emote bubbles project through this matrix, and the render
+  // below is skipped on a hidden tab — without this they would stay pinned to
+  // a stale one.
+  camera.updateMatrixWorld();
+}
+
+// ---------------------------------------------------------------------------
 // Per-frame update
 // ---------------------------------------------------------------------------
 let prevLastTouchSide = -1;
@@ -2742,8 +3106,8 @@ const AURA_PALETTES: [number, number][] = [
   [0x40d0ff, 0xf0ffff],
   [0xff4020, 0xffa020],
 ];
-const chargePalette = [0, 0, 0, 0, 0, 0]; // per-rig palette rolled per charge
-const lastChargeAt = [-1e9, -1e9, -1e9, -1e9, -1e9, -1e9]; // per-rig: detects a fresh charge
+const chargePalette: number[] = new Array(RIG_COUNT).fill(0); // per-rig palette rolled per charge
+const lastChargeAt: number[] = new Array(RIG_COUNT).fill(-1e9); // per-rig: detects a fresh charge
 
 export function drawScene(scene: Scene) {
   if (!renderer) return;
@@ -2767,14 +3131,19 @@ export function drawScene(scene: Scene) {
     const struck =
       speed > 16 && (prevBallSpeed < 8 || ball.lastTouchSide !== prevLastTouchSide);
     if (struck && prevLastTouchSide !== -1) {
-      // the striker is whoever on that side is closest to the ball
-      const striker = scene.players
-        .filter(p => p.side === ball.lastTouchSide)
-        .sort(
-          (a, b) =>
-            Math.hypot(ball.x - a.x, ball.y - a.y) - Math.hypot(ball.x - b.x, ball.y - b.y)
-        )[0];
-      const rig = striker ? playerRigs[striker.rigSlot ?? striker.side] : undefined;
+      // the striker is the body the server says touched it last; falling
+      // back to the closest one on that side for scenes built without it
+      const striker =
+        scene.strikerRigSlot !== undefined
+          ? scene.players.find(p => (p.rigSlot ?? p.side * SQUAD_SIZE) === scene.strikerRigSlot)
+          : scene.players
+              .filter(p => p.side === ball.lastTouchSide)
+              .sort(
+                (a, b) =>
+                  Math.hypot(ball.x - a.x, ball.y - a.y) -
+                  Math.hypot(ball.x - b.x, ball.y - b.y)
+              )[0];
+      const rig = striker ? playerRigs[striker.rigSlot ?? striker.side * SQUAD_SIZE] : undefined;
       if (rig && striker) {
         const sliding = (striker.slideTicks ?? 0) > 0;
         const chip = ball.vz > 9; // lofted: a chip, a cross, or a keeper's punt
@@ -2840,7 +3209,8 @@ export function drawScene(scene: Scene) {
   auraRing.visible = false; // re-shown below while a finisher is charging
   for (let slot = 0; slot < playerRigs.length; slot++) {
     const rig = playerRigs[slot];
-    const pl = scene.players.find(p => (p.rigSlot ?? p.side) === slot);
+    // no rigSlot (an older recorded scene): fall back to seat 0 of the side
+    const pl = scene.players.find(p => (p.rigSlot ?? p.side * SQUAD_SIZE) === slot);
     if (!pl) {
       rig.root.visible = false;
       continue;
@@ -2848,7 +3218,7 @@ export function drawScene(scene: Scene) {
     const side = pl.side;
     rig.root.visible = true;
     const character = CHARACTERS[pl.characterId ?? 0];
-    if (character) applyCharacter(rig, character);
+    if (character) applyCharacter(rig, character, pl.role === ROLE_KEEPER);
     const pos = toThree(flip, pl.x, pl.y, 0);
     rig.root.position.x = pos.x;
     rig.root.position.z = pos.z;
@@ -2859,8 +3229,15 @@ export function drawScene(scene: Scene) {
     rig.prevPX = pos.x;
     rig.prevPZ = pos.z;
     if (stepDist < 6) rig.runPhase += stepDist * RUN_STRIDE_RATE;
-    const near = pos.z > 0;
-    const baseYaw = near ? Math.PI : 0;
+    // Idle facing is UP THE PITCH, toward the goal this side attacks. (Keying
+    // it off which half of the world you stand in — side-on, that is which
+    // touchline you are nearer — spins an idle player 180° as he walks
+    // across the pitch.) A keeper faces the ball instead, always.
+    const atk = attackDir(side, flip);
+    const baseYaw =
+      pl.role === ROLE_KEEPER && ballPos3
+        ? Math.atan2(ballPos3.x - pos.x, ballPos3.z - pos.z)
+        : (atk * Math.PI) / 2;
 
     // air-kick: the charge was released with nothing at the player's feet
     if (rig.prevKickTicks > 0 && !pl.kickHeld && rig.kickStart < 0) {
@@ -2899,7 +3276,7 @@ export function drawScene(scene: Scene) {
       if (t >= 1) {
         rig.kickStart = -1;
         rig.contactPoint = null;
-        target = moving ? runPose(rig.runPhase, pl.dirX) : readyPose(now, rig.runSeed);
+        target = moving ? runPose(rig.runPhase, pl.dirY * flip) : readyPose(now, rig.runSeed);
       } else {
         swingT = t;
         target = kickPose(rig.kickAnim, t, rig.kickLow, rig.kickPower);
@@ -2939,7 +3316,8 @@ export function drawScene(scene: Scene) {
         auraMat.color.setHex(Math.sin(now / 150) > 0 ? flameCol : arcCol);
       }
     } else if (moving) {
-      target = runPose(rig.runPhase, pl.dirX);
+      // the lean is a SCREEN-space one, so it reads off the along-pitch axis
+      target = runPose(rig.runPhase, pl.dirY * flip);
       rate = 16;
     } else {
       target = readyPose(now, rig.runSeed);
@@ -2948,7 +3326,7 @@ export function drawScene(scene: Scene) {
     // keep the feet running while a kick is only being CHARGED — the strike
     // itself owns the legs, so it is never overwritten here
     if (moving && rig.kickStart < 0 && pl.kickHeld) {
-      const legs = runPose(rig.runPhase, pl.dirX);
+      const legs = runPose(rig.runPhase, pl.dirY * flip);
       target.thighL = legs.thighL;
       target.calfL = legs.calfL;
       target.thighR = legs.thighR;
@@ -3094,13 +3472,13 @@ export function drawScene(scene: Scene) {
     // A football ROLLS: spin it about the axis perpendicular to its travel,
     // at the rate its own circumference demands, so the panels track the
     // ground instead of skating over it.
-    const vel3 = new THREE.Vector3(ball.vx * flip, ball.vz, -ball.vy * flip);
+    const vel3 = new THREE.Vector3(ball.vy * flip, ball.vz, ball.vx * flip);
     const spd = vel3.length();
     ballMesh.scale.set(1, 1, 1);
     if (spd > 0.5) {
       const axis = new THREE.Vector3(0, 1, 0).cross(vel3).normalize();
       if (axis.lengthSq() > 0.001) {
-        _dq3.setFromAxisAngle(axis, (spd / 0.55) * dt);
+        _dq3.setFromAxisAngle(axis, (spd / BALL_RADIUS) * dt);
         ballMesh.quaternion.premultiply(_dq3);
       }
       // a screamer stretches a touch along its flight for a sense of pace
@@ -3111,8 +3489,17 @@ export function drawScene(scene: Scene) {
     }
     ballBlob.visible = true;
     ballBlob.position.set(bp.x, 0.02, bp.z);
-    const sc = Math.max(0.4, 1 - ball.z / 30);
+    // a chip only clears head height, so the blob has to shrink over the
+    // first few units of lift, not over thirty
+    const sc = Math.max(0.45, 1 - ball.z / 8);
     ballBlob.scale.set(sc, sc, sc);
+    ballDrop.visible = ball.z > 0.9;
+    if (ballDrop.visible) {
+      const pts = ballDrop.geometry.attributes.position as THREE.BufferAttribute;
+      pts.setXYZ(0, bp.x, 0.03, bp.z);
+      pts.setXYZ(1, bp.x, bp.y - BALL_RADIUS * 0.5, bp.z);
+      pts.needsUpdate = true;
+    }
 
     if (gfx.trail) {
       trailHistory.unshift(bp.clone());
@@ -3126,6 +3513,7 @@ export function drawScene(scene: Scene) {
   } else {
     ballMesh.visible = false;
     ballBlob.visible = false;
+    ballDrop.visible = false;
     ballLight.intensity = 0;
     trailHistory.length = 0;
     for (const t of trailMeshes) t.visible = false;
@@ -3151,48 +3539,7 @@ export function drawScene(scene: Scene) {
     }
   }
 
-  if (scene.replayCam) {
-    // broadcast side camera for replays — steady, no shake
-    const replayFov = fovForAspect(42);
-    if (Math.abs(camera.fov - replayFov) > 0.05) {
-      camera.fov = replayFov;
-      camera.updateProjectionMatrix();
-    }
-    camera.position.set(64, 15, 8);
-    // follow the ball: ease the look-at onto the flight so the landing —
-    // and how close it came to the line — stays centered in frame
-    const bt = scene.ball
-      ? toThree(scene.flip, scene.ball.x, scene.ball.y, Math.min(scene.ball.z, 12))
-      : null;
-    if (bt) {
-      if (!replayLook) replayLook = bt.clone();
-      else replayLook.lerp(bt, 1 - Math.exp(-6 * dt));
-    } else if (!replayLook) {
-      replayLook = new THREE.Vector3(0, 2.5, 0);
-    }
-    camera.lookAt(replayLook);
-    varCamH = 0;
-  } else {
-    replayLook = null;
-    varCamH = 0;
-    const baseFov = 46;
-    const targetFov = fovForAspect(baseFov);
-    if (Math.abs(camera.fov - targetFov) > 0.05) {
-      camera.fov = targetFov;
-      camera.updateProjectionMatrix();
-    }
-    const sx = (Math.sin(now * 0.081) + Math.sin(now * 0.023)) * 0.5 * shakeAmp;
-    const sy = (Math.sin(now * 0.097 + 2) + Math.sin(now * 0.031 + 1)) * 0.5 * shakeAmp;
-    camera.position.set(CAM_POS.x + sx, CAM_POS.y + sy, CAM_POS.z + sx * 0.4);
-    camera.lookAt(CAM_TARGET.x + sx * 0.5, CAM_TARGET.y + sy * 0.5, CAM_TARGET.z);
-    // Portrait: the widened frame centers on the landscape framing, leaving
-    // most of the extra height as empty sky — pitch down through part of the
-    // gained angle so the court rides high and the foreground (where the
-    // touch controls sit) takes the slack instead.
-    if (targetFov > baseFov) {
-      camera.rotateX(-THREE.MathUtils.degToRad((targetFov - baseFov) * 0.14));
-    }
-  }
+  updateBroadcastCamera(scene, dt, now);
 
   // Hidden tabs still run the 250ms keep-alive loop for game/UI state (and
   // hit/bounce sounds above) — but painting a frame nobody sees is pure GPU

@@ -28,18 +28,18 @@ export const DATABASE_NAME =
 export const TICK_HZ = 30;
 
 // Pitch geometry — must mirror spacetimedb/src/index.ts.
-export const PITCH_HALF_LEN = 40;
-export const PITCH_HALF_WID = 24;
-export const GOAL_HALF_W = 7;
-export const GOAL_HEIGHT = 4.6;
-export const BOX_DEPTH = 11;
-export const BOX_HALF_W = 13;
-export const CENTER_CIRCLE_R = 8;
-export const BALL_RADIUS = 0.55;
-export const GRAVITY = -60;
-export const PLAYER_SPEED = 24;
-export const CONTROL_RADIUS = 2.6; // ball inside this sticks to your feet
-export const KICK_RANGE = 3.0;
+export const PITCH_HALF_LEN = 66;
+export const PITCH_HALF_WID = 34;
+export const GOAL_HALF_W = 6.5;
+export const GOAL_HEIGHT = 6.6;
+export const BOX_DEPTH = 20;
+export const BOX_HALF_W = 20;
+export const CENTER_CIRCLE_R = 10;
+export const BALL_RADIUS = 0.45;
+export const GRAVITY = -38;
+export const PLAYER_SPEED = 17;
+export const CONTROL_RADIUS = 2.8; // ball inside this sticks to your feet
+export const KICK_RANGE = 3.4;
 export const STAMINA_MAX = 1000;
 
 // Match format — mirrors HALF_SECONDS / OT_SECONDS.
@@ -49,6 +49,12 @@ export const OT_SECONDS = 120;
 // Player roles (player.role)
 export const ROLE_OUTFIELD = 0;
 export const ROLE_KEEPER = 1;
+// Bodies per side, and the rig seat every keeper parks on. The renderer keeps
+// SQUAD_SIZE rigs per side (rigSlot = side * SQUAD_SIZE + seat); the module
+// gives keepers teamSlot 0, the same seat as the first outfielder, so without
+// a seat of their own the two share a rig and one of them is never drawn.
+export const SQUAD_SIZE = 5;
+export const KEEPER_RIG_SEAT = 4;
 
 // Match phases (match.phase) — mirrors PHASE_* in the module.
 export const PHASE_KICKOFF = 1;

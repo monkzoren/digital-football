@@ -294,6 +294,15 @@
       padding: 8px 12px;
     }
     #chat-input.open { display: block; }
+    /* One column per rig seat, built by main.ts. The host is a stacking
+       context of its own, so the columns can be re-ordered by depth every
+       frame (positionHeadAnnos) without ever climbing over the HUD. */
+    #head-annos {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      z-index: 5;
+    }
     /* Anchored just above a player's head each frame (see headScreenPos) */
     .head-anno {
       position: absolute;
@@ -306,7 +315,6 @@
       align-items: center;
       gap: 2px;
       pointer-events: none;
-      z-index: 5;
     }
     .emote-pop {
       font-size: 42px;
@@ -3082,16 +3090,7 @@
     <button id="spectate-exit" class="alt hidden">◀ Stop Watching</button>
     <div id="chat-feed"></div>
     <input id="chat-input" type="text" maxlength="120" placeholder="SAY SOMETHING… (ENTER)" autocomplete="off" />
-    <div id="head-anno-0" class="head-anno">
-      <div id="emote-pop-0" class="emote-pop"></div>
-      <div id="speech-0" class="speech"></div>
-      <div id="name-tag-0" class="name-tag"></div>
-    </div>
-    <div id="head-anno-1" class="head-anno">
-      <div id="emote-pop-1" class="emote-pop"></div>
-      <div id="speech-1" class="speech"></div>
-      <div id="name-tag-1" class="name-tag"></div>
-    </div>
+    <div id="head-annos"></div>
 
     <div id="touch-controls" class="hidden">
       <div id="touch-stick-zone"></div>
