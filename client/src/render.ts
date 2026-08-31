@@ -8,6 +8,8 @@ import {
   BOX_HALF_W,
   CENTER_CIRCLE_R,
   BALL_RADIUS,
+  PLAYER_SPEED,
+  SPRINT_MUL,
   CONTROL_RADIUS,
   SQUAD_SIZE,
   ROLE_KEEPER,
@@ -405,6 +407,15 @@ interface PlayerRig {
   runPhase: number; // stride cycle, advanced by ground distance (not time)
   prevPX: number; // last frame's render position — measures that distance
   prevPZ: number;
+  // locomotion: measured ground speed and the gait it selects. Both are
+  // smoothed, because the raw per-frame step distance is noisy at 30 Hz and
+  // an unsmoothed gait factor makes the legs flutter between jog and sprint.
+  speed: number; // render units per second, smoothed
+  gait: number; // 0 = jog, 1 = flat sprint — what runPose blends between
+  turnBank: number; // smoothed yaw RATE, leaned into like a cyclist
+  prevYaw: number;
+  pivotUntil: number; // plant-and-turn timer: a hard reverse is a step, not a spin
+  pivotDir: number;
   // animation state
   kickStart: number; // -1 = not kicking
   kickAnim: KickKind;
@@ -471,6 +482,14 @@ function slideRollPose(now: number, seed: number, decay: number): Pose {
     twist: f(83, 2) * 0.25,
     crouch: 0.35 * (1 - decay),
   };
+}
+
+// Linear blend between two poses, channel by channel — the one primitive a
+// blend tree needs. w = 0 is a, w = 1 is b.
+function blendPose(a: Pose, b: Pose, w: number): Pose {
+  const out = { ...a };
+  for (const k of POSE_KEYS) out[k] = a[k] + (b[k] - a[k]) * w;
+  return out;
 }
 
 const _dq1 = new THREE.Quaternion();
@@ -1667,6 +1686,12 @@ function makePlayerRig(side: number, intoScene: THREE.Scene = scene3): PlayerRig
     runPhase: side * 2.7,
     prevPX: 0,
     prevPZ: 0,
+    speed: 0,
+    gait: 0,
+    turnBank: 0,
+    prevYaw: side === 0 ? Math.PI : 0,
+    pivotUntil: -1e9,
+    pivotDir: 1,
     kickStart: -1,
     kickAnim: 'drive',
     kickLow: false,
@@ -1721,39 +1746,127 @@ function applyPose(
 }
 
 // --- pose library -----------------------------------------------------------
+// Standing in play. This used to be the tennis ready stance — a deep crouch
+// with a two-handed grip out front — which on a football pitch reads as ten
+// men holding invisible rackets. A footballer waiting for the ball stands
+// tall, arms loose at his sides, shifting his weight and jogging on the spot
+// between phases.
 function readyPose(now: number, seed: number): Pose {
-  const sway = Math.sin(now / 550 + seed) * 0.04;
+  const bob = Math.sin(now / 480 + seed);
+  const shift = Math.sin(now / 900 + seed * 1.7); // weight rocking foot to foot
   return {
     ...ZERO_POSE,
-    leanF: 0.22,
-    crouch: 0.22 + Math.sin(now / 275 + seed) * 0.03,
-    thighL: -0.32, calfL: 0.5, thighR: -0.32, calfR: 0.5,
-    // two-handed ready grip in front
-    shLx: -0.85 + sway, shLz: 0.55, elL: -1.15,
-    shRx: -0.85 + sway, shRz: -0.55, elR: -1.15,
+    leanF: 0.06,
+    leanS: shift * 0.05,
+    twist: shift * 0.06,
+    crouch: 0.07 + Math.abs(bob) * 0.025,
+    // feet apart, knees only just off locked — an athletic stand, not a squat
+    thighL: -0.1 + shift * 0.06, calfL: 0.16,
+    thighR: -0.1 - shift * 0.06, calfR: 0.16,
+    // arms hang and swing a little with the weight shift
+    shLx: -0.12 + shift * 0.1, shLz: 0.17, elL: -0.3,
+    shRx: -0.12 - shift * 0.1, shRz: -0.17, elR: -0.3,
   };
 }
 
-// Stride cadence: radians of run cycle per world unit of ground covered.
-// One full cycle (two steps) then spans ~2π/0.85 ≈ 7.4 units — about what
-// these legs actually cover at full extension, so the shoes grip instead
-// of skating. The phase is fed from measured movement, not wall-clock time.
-const RUN_STRIDE_RATE = 0.85;
-
-function runPose(phase: number, lean: number): Pose {
-  const t = phase;
-  const s = Math.sin(t);
-  const c = Math.sin(t + Math.PI);
+// A keeper between the sticks does not stand like an outfielder: knees bent,
+// feet wide, hands up and open, bouncing on his toes as the play comes at him.
+function keeperSetPose(now: number, seed: number): Pose {
+  const bounce = Math.sin(now / 260 + seed);
   return {
     ...ZERO_POSE,
     leanF: 0.3,
-    leanS: lean * 0.12,
-    twist: s * 0.14, // hips/shoulders counter-rotate with the stride
-    crouch: 0.12 + Math.abs(Math.sin(t)) * 0.05,
-    thighL: s * 1.0, calfL: Math.max(0, -s) * 1.15 + 0.15,
-    thighR: c * 1.0, calfR: Math.max(0, -c) * 1.15 + 0.15,
-    shLx: c * 0.7 - 0.25, shLz: 0.15, elL: -0.9,
-    shRx: s * 0.7 - 0.25, shRz: -0.15, elR: -0.9,
+    crouch: 0.34 + Math.abs(bounce) * 0.06,
+    thighL: -0.5, calfL: 0.78,
+    thighR: -0.5, calfR: 0.78,
+    // gloves up and out, ready to spread
+    shLx: -0.5, shLz: 0.95, elL: -1.25,
+    shRx: -0.5, shRz: -0.95, elR: -1.25,
+  };
+}
+
+// Hip height, and therefore leg length — the number that ties the stride
+// animation to the ground. Mirrors HIP_Y.
+const LEG_LEN = 2.25;
+
+// A stride's length is set by how far the thigh swings: the foot lands about
+// LEG_LEN*sin(amp) ahead of the hip and leaves it the same distance behind,
+// so one step covers 2*LEG_LEN*sin(amp) and a full two-step cycle twice that.
+// Turning that around gives the radians of cycle per unit of ground covered,
+// which is how the phase is driven. Deriving the cadence from the amplitude
+// instead of fixing it is what lets the gait change with speed WITHOUT the
+// shoes starting to skate: a longer stride automatically means fewer of them.
+function strideRateFor(thighAmp: number): number {
+  return Math.PI / (2 * LEG_LEN * Math.sin(thighAmp));
+}
+
+// Gait shape. g = 0 is a jog, g = 1 is a flat sprint. Everything scales
+// together the way it does on a real runner: the thigh swings further, the
+// knee picks up higher behind, the trunk leans in, the arms drive instead of
+// swinging, and the whole body drops a little onto its toes.
+const JOG_AMP = 0.72;
+const SPRINT_AMP = 1.32;
+// Where the gait blend starts and tops out, in render units per second.
+// PLAYER_SPEED is a run; PLAYER_SPEED * SPRINT_MUL is the flat sprint, so a
+// player off the ball at walking pace jogs and a sprinter is fully extended.
+const GAIT_JOG_SPEED = PLAYER_SPEED * 0.55;
+const GAIT_SPRINT_SPEED = PLAYER_SPEED * SPRINT_MUL;
+// Below this a player is standing, whatever the stick says.
+const GAIT_IDLE_SPEED = PLAYER_SPEED * 0.14;
+function thighAmpFor(g: number): number {
+  return JOG_AMP + (SPRINT_AMP - JOG_AMP) * g;
+}
+
+function runPose(phase: number, lean: number, g: number): Pose {
+  const t = phase;
+  const s = Math.sin(t);
+  const c = Math.sin(t + Math.PI);
+  const amp = thighAmpFor(g);
+  // knee tuck behind, and arm drive, both grow with the gait
+  const tuck = 0.95 + 0.65 * g;
+  const armAmp = 0.45 + 0.55 * g;
+  return {
+    ...ZERO_POSE,
+    leanF: 0.16 + 0.34 * g, // upright jog → driving forward lean at a sprint
+    leanS: lean,
+    twist: s * (0.1 + 0.12 * g), // hips/shoulders counter-rotate with the stride
+    crouch: 0.06 + 0.12 * g + Math.abs(s) * (0.03 + 0.04 * g),
+    thighL: s * amp, calfL: Math.max(0, -s) * tuck + 0.12,
+    thighR: c * amp, calfR: Math.max(0, -c) * tuck + 0.12,
+    // elbows tighten as the arms start to drive rather than swing
+    shLx: c * armAmp - 0.2 - 0.2 * g, shLz: 0.15, elL: -0.75 - 0.5 * g,
+    shRx: s * armAmp - 0.2 - 0.2 * g, shRz: -0.15, elR: -0.75 - 0.5 * g,
+  };
+}
+
+// How long a plant-and-turn takes. Short enough to stay responsive — the
+// server never stops moving the body, this only changes what it looks like.
+const PIVOT_MS = 260;
+
+// Standing still: a keeper sets himself, everyone else stands like a
+// footballer.
+function idlePose(pl: { role?: number }, now: number, seed: number): Pose {
+  return (pl.role ?? 0) === ROLE_KEEPER ? keeperSetPose(now, seed) : readyPose(now, seed);
+}
+
+// Plant-and-turn. A footballer reversing does not rotate on the spot like a
+// turret: he plants the outside foot, drops his hips and pushes off it. This
+// is the pose that plays over the pivot window, blended over the run.
+function pivotPose(k: number, dir: number): Pose {
+  const swing = Math.sin(Math.min(1, k) * Math.PI);
+  return {
+    ...ZERO_POSE,
+    leanF: 0.1,
+    leanS: -dir * 0.42 * swing, // hips dropped INTO the turn
+    twist: dir * 0.4 * swing, // shoulders lead the feet round
+    crouch: 0.18 + 0.24 * swing,
+    // outside leg braced and straight, inside leg gathering under the body
+    thighL: dir > 0 ? -0.55 * swing : 0.35 * swing,
+    calfL: dir > 0 ? 0.25 : 0.85 * swing,
+    thighR: dir > 0 ? 0.35 * swing : -0.55 * swing,
+    calfR: dir > 0 ? 0.85 * swing : 0.25,
+    shLx: -0.35 - 0.5 * swing, shLz: 0.4 * swing + 0.15, elL: -0.7,
+    shRx: -0.35 + 0.9 * swing, shRz: -0.4 * swing - 0.15, elR: -0.7,
   };
 }
 
@@ -2705,7 +2818,7 @@ function buildScene() {
   // covers a canvas that has not been laid out yet.
   const aspect =
     hostCanvas.clientHeight > 0 ? hostCanvas.clientWidth / hostCanvas.clientHeight : BASE_ASPECT;
-  camera = new THREE.PerspectiveCamera(CAM_FOV, aspect, 0.8, 300);
+  camera = new THREE.PerspectiveCamera(CAM_FOV, aspect, 0.8, 700);
   camReady = false; // updateBroadcastCamera snaps onto the play on frame one
 
   sun = new THREE.DirectionalLight(0xfff2df, 2.2); // late-afternoon warmth
@@ -2934,17 +3047,36 @@ function disposeScene() {
 const CAM_ELEV = THREE.MathUtils.degToRad(26);
 const CAM_SIN = Math.sin(CAM_ELEV);
 const CAM_COS = Math.cos(CAM_ELEV);
-const CAM_FOV = 36;
+// Football is shot on a LONG LENS from well back, not a wide lens from the
+// touchline, and the difference is not cosmetic. A close wide camera cannot
+// aim at the far side of the pitch without the gantry ending up standing on
+// it, so the aim stays pinned near its own touchline and the play piles into
+// the top of the frame with half the screen empty grass. Backing off and
+// zooming in fixes the geometry AND the look: bodies read bigger, the
+// perspective flattens the way television does, and the aim is free to
+// follow the play right across the width.
+const CAM_FOV = 19;
 const K_TRUCK = 0.72; // body pans slower than head: 1.0 would be a turntable
 // How far the ball may drift from the aim before the camera moves at all.
 const CAM_DEADZONE = 6;
 const S_LIMIT = PITCH_HALF_LEN * 0.65; // the rail stops short of the goal ends
-const R_DEFAULT = PITCH_HALF_LEN * 1.14;
-const R_MIN = PITCH_HALF_LEN * 0.95;
-const R_MAX = PITCH_HALF_LEN * 1.4;
-// Base offset of the aim toward the camera's own touchline. It is only a
-// floor's worth of the story — see wFloor below, which solves the rest of it
-// against the boom so the near touchline never falls out of frame.
+// Boom length. These were set so the whole width of the pitch stayed in
+// shot, which on a 68-unit pitch put a footballer at about 8% of frame
+// height — too small to read a body shape, a kit or a run. Football is shot
+// tight enough to see who has it; the camera follows play across the width
+// instead of trying to hold both touchlines.
+// With a 19° lens the visible height at the aim is 2·R·tan(9.5°), so these
+// are chosen from what a player has to be able to SEE, not from how the rig
+// looks: the floor still shows ~36 units of pitch (enough to pick a pass),
+// the default ~42, and the ceiling ~64 when play stretches.
+const R_DEFAULT = PITCH_HALF_LEN * 1.9;
+const R_MIN = PITCH_HALF_LEN * 1.63;
+const R_MAX = PITCH_HALF_LEN * 2.9;
+// How far outside the touchline the camera itself stands. The aim may travel
+// across the pitch, but the gantry may never end up ON it.
+const RAIL_MARGIN = 8;
+// Base offset of the aim toward the camera's own touchline — a broadcast
+// frame sits a little on the near side of the ball, not dead on it.
 const CAM_AIM_W = PITCH_HALF_WID * 0.18;
 const CAM_AIM_Y = 1.6;
 // Past this the aim did not move, it TELEPORTED (a restart spot the far side
@@ -3118,23 +3250,24 @@ function updateBroadcastCamera(scene: Scene, dt: number, now: number) {
       aimS += (want - aimS) * (1 - Math.exp(-3.2 * dt));
     }
   }
-  // Pushing the aim toward the camera's own touchline is what sets the
-  // horizon. How far it has to go depends on the boom, so solve it: the near
-  // touchline is the frame's anchor side-on, and a picture that has lost it
-  // feels unmoored. Solving the bottom ray for the aim keeps that line a
-  // constant few units inside the bottom edge at any boom length, elevation,
-  // FOV or aspect — portrait included.
-  const tanDown = Math.tan(CAM_ELEV + THREE.MathUtils.degToRad(fovV / 2));
-  const wFloor = THREE.MathUtils.clamp(
-    PITCH_HALF_WID + 2 - camR * (CAM_COS - CAM_SIN / tanDown) + CAM_AIM_Y / tanDown,
-    -2,
-    PITCH_HALF_WID * 0.6
-  );
+  // The aim FOLLOWS THE PLAY across the pitch. This used to be pinned near
+  // the camera's own touchline by a rule that kept that line inside the
+  // bottom edge at any boom — a tennis instinct, where the whole court fits.
+  // On a 68-unit pitch it meant that with play on the far side the camera was
+  // aimed thirty units away from it, and every body piled up against the top
+  // of the frame with half the screen empty grass.
+  //
+  // The one thing that genuinely constrains the aim is the gantry: the eye
+  // sits at aimW + camR·cos(elev), so pushing the aim too far across would
+  // stand the camera on the pitch. Solve for that and nothing else — and note
+  // it is self-correcting, because a play the floor will not reach widens the
+  // boom, which lowers the floor.
+  const railFloor = PITCH_HALF_WID + RAIL_MARGIN - camR * CAM_COS;
   const wantW = Math.max(
-    wFloor,
-    CAM_AIM_W + THREE.MathUtils.clamp(tgtW * 0.35, -7, 7)
+    railFloor,
+    CAM_AIM_W + THREE.MathUtils.clamp(tgtW * 0.8, -22, 12)
   );
-  aimW = jump ? wantW : aimW + (wantW - aimW) * (1 - Math.exp(-2.2 * dt));
+  aimW = jump ? wantW : aimW + (wantW - aimW) * (1 - Math.exp(-3 * dt));
   const truck = THREE.MathUtils.clamp(K_TRUCK * aimS, -S_LIMIT, S_LIMIT);
   camS = jump ? truck : camS + (truck - camS) * (1 - Math.exp(-1.8 * dt));
   camReady = true;
@@ -3166,7 +3299,9 @@ function updateBroadcastCamera(scene: Scene, dt: number, now: number) {
   if (ball) {
     for (const pl of scene.players) {
       if (pl === focus || pl.role === ROLE_KEEPER) continue;
-      if (Math.hypot(pl.x - ball.x, pl.y - ball.y) > 30) continue;
+      // only the bodies actually involved: at 30 units this was most of the
+      // pitch, and holding all of them in shot is what forced the long boom
+      if (Math.hypot(pl.x - ball.x, pl.y - ball.y) > 22) continue;
       pushInterest(pl.y * flip, 3, pl.x * flip);
     }
   }
@@ -3459,7 +3594,23 @@ export function drawScene(scene: Scene) {
     const stepDist = Math.hypot(pos.x - rig.prevPX, pos.z - rig.prevPZ);
     rig.prevPX = pos.x;
     rig.prevPZ = pos.z;
-    if (stepDist < 6) rig.runPhase += stepDist * RUN_STRIDE_RATE;
+    const teleported = stepDist >= 6; // restart snap, camera flip — not a stride
+    // Measured ground speed, smoothed: a 30 Hz row read at 60+ fps gives a
+    // step distance that alternates between a full tick and nothing, and an
+    // unsmoothed gait factor off that makes the legs flutter.
+    if (!teleported && dt > 0) {
+      const inst = stepDist / dt;
+      rig.speed += (inst - rig.speed) * (1 - Math.exp(-8 * dt));
+    }
+    // Gait: 0 at a jog, 1 at a flat sprint. Anything under a walk is idle and
+    // never reaches runPose at all.
+    const gTarget = THREE.MathUtils.clamp(
+      (rig.speed - GAIT_JOG_SPEED) / (GAIT_SPRINT_SPEED - GAIT_JOG_SPEED), 0, 1
+    );
+    rig.gait += (gTarget - rig.gait) * (1 - Math.exp(-6 * dt));
+    // Stride cadence follows the gait's amplitude, so the foot still plants
+    // where the ground is: a longer stride is fewer of them, not faster ones.
+    if (!teleported) rig.runPhase += stepDist * strideRateFor(thighAmpFor(rig.gait));
     // Idle facing is UP THE PITCH, toward the goal this side attacks. (Keying
     // it off which half of the world you stand in — side-on, that is which
     // touchline you are nearer — spins an idle player 180° as he walks
@@ -3475,7 +3626,10 @@ export function drawScene(scene: Scene) {
     if (rig.prevKickTicks === 0 && pl.kickTicks > 0) rig.windupStart = now;
     rig.prevKickTicks = pl.kickTicks;
 
-    const moving = pl.dirX !== 0 || pl.dirY !== 0;
+    // Moving means actually covering ground. Keying it off the stick alone
+    // ran a player on the spot whenever he was blocked, held at a restart, or
+    // pinned on the touchline — legs going, world still.
+    const moving = rig.speed > GAIT_IDLE_SPEED;
     const striking = pl.kickHeld || rig.kickStart >= 0;
 
     // facing priority: ball while striking > movement direction > face upfield.
@@ -3490,13 +3644,37 @@ export function drawScene(scene: Scene) {
     } else if (moving) {
       const mv = toThree(flip, pl.dirX, pl.dirY, 0);
       yawTarget = Math.atan2(mv.x, mv.z);
-      yawRate = 14;
+      // You turn your shoulders faster at a jog than at a flat sprint — at
+      // speed the body has to come round with the feet, and that reluctance
+      // is what a hard change of direction is supposed to cost.
+      yawRate = 16 - 7 * rig.gait;
     } else if (ballPos3) {
       // standing still: turn to face the play, the way a footballer does
       yawTarget = Math.atan2(ballPos3.x - pos.x, ballPos3.z - pos.z);
       yawRate = 6;
     }
+    // A hard reverse while actually running is a plant-and-turn, not a spin:
+    // arm the pivot, which both slows the yaw for its duration and plays the
+    // braced step over the top of the run.
+    const yawErr = wrapAngle(yawTarget - rig.yaw);
+    if (
+      moving && !striking && !keeper &&
+      Math.abs(yawErr) > 1.9 && rig.speed > GAIT_JOG_SPEED && now > rig.pivotUntil + PIVOT_MS
+    ) {
+      rig.pivotUntil = now + PIVOT_MS;
+      rig.pivotDir = Math.sign(yawErr) || 1;
+    }
+    const pivotK = rig.pivotUntil > now ? 1 - (rig.pivotUntil - now) / PIVOT_MS : -1;
+    if (pivotK >= 0) yawRate *= 0.55;
+    rig.prevYaw = rig.yaw;
     rig.yaw = blendAngle(rig.yaw, yawTarget, yawRate, dt);
+    // Bank into the turn like a cyclist: the lean comes from how fast the
+    // body is actually coming round, scaled by how fast it is travelling.
+    const yawRateNow = dt > 0 ? wrapAngle(rig.yaw - rig.prevYaw) / dt : 0;
+    const bankTarget = THREE.MathUtils.clamp(
+      -yawRateNow * 0.09 * THREE.MathUtils.clamp(rig.speed / GAIT_SPRINT_SPEED, 0, 1), -0.5, 0.5
+    );
+    rig.turnBank += (bankTarget - rig.turnBank) * (1 - Math.exp(-9 * dt));
 
     let target: Pose;
     let rate = 12;
@@ -3506,7 +3684,9 @@ export function drawScene(scene: Scene) {
       if (t >= 1) {
         rig.kickStart = -1;
         rig.contactPoint = null;
-        target = moving ? runPose(rig.runPhase, pl.dirY * flip) : readyPose(now, rig.runSeed);
+        target = moving
+          ? runPose(rig.runPhase, rig.turnBank, rig.gait)
+          : idlePose(pl, now, rig.runSeed);
       } else {
         swingT = t;
         target = kickPose(rig.kickAnim, t, rig.kickLow, rig.kickPower);
@@ -3519,17 +3699,26 @@ export function drawScene(scene: Scene) {
       target = kickWindup(pl.kickKind === 1 ? 'chip' : 'drive', charge);
       rate = 22;
     } else if (moving) {
-      // the lean is a SCREEN-space one, so it reads off the along-pitch axis
-      target = runPose(rig.runPhase, pl.dirY * flip);
-      rate = 16;
+      target = runPose(rig.runPhase, rig.turnBank, rig.gait);
+      // the faster you are going the less the body can be re-posed per
+      // second: a sprint is committed, a jog is not
+      rate = 20 - 6 * rig.gait;
+      // a plant-and-turn is blended OVER the run rather than replacing it,
+      // so the legs keep their cycle while the body braces round
+      if (pivotK >= 0) {
+        const pv = pivotPose(pivotK, rig.pivotDir);
+        const w = Math.sin(Math.min(1, pivotK) * Math.PI) * 0.85;
+        target = blendPose(target, pv, w);
+        rate = 26;
+      }
     } else {
-      target = readyPose(now, rig.runSeed);
+      target = idlePose(pl, now, rig.runSeed);
     }
 
     // keep the feet running while a kick is only being CHARGED — the strike
     // itself owns the legs, so it is never overwritten here
     if (moving && rig.kickStart < 0 && pl.kickHeld) {
-      const legs = runPose(rig.runPhase, pl.dirY * flip);
+      const legs = runPose(rig.runPhase, rig.turnBank, rig.gait);
       target.thighL = legs.thighL;
       target.calfL = legs.calfL;
       target.thighR = legs.thighR;
