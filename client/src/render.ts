@@ -2798,7 +2798,7 @@ function buildScene() {
   // enough that sharing it would only complicate disposal.
   const mkRing = (opacity: number) => {
     const m = new THREE.Mesh(
-      new THREE.RingGeometry(1.15, 1.58, 40),
+      new THREE.RingGeometry(1.2, 1.78, 40),
       new THREE.MeshBasicMaterial({
         color: 0xffffff, transparent: true, opacity, side: THREE.DoubleSide, depthWrite: false,
       })
@@ -2812,7 +2812,7 @@ function buildScene() {
   ghostRing = mkRing(0.5);
   pilotRings = Array.from({ length: RIG_COUNT }, () => mkRing(0.28));
   focusChevron = new THREE.Mesh(
-    new THREE.ConeGeometry(0.44, 0.78, 4),
+    new THREE.ConeGeometry(0.52, 0.9, 4),
     new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.95, depthWrite: false })
   );
   focusChevron.rotation.set(Math.PI, Math.PI / 4, 0); // point down, corner-on
@@ -3302,7 +3302,7 @@ function updateControlMarkers(scene: Scene, now: number) {
     if (used >= pilotRings.length || slot === scene.focusSlot) continue;
     const rig = markerRig(slot);
     if (!rig) continue;
-    placeRing(pilotRings[used++], rig, 0.05, markerColor(rig), 0.26, 0.86);
+    placeRing(pilotRings[used++], rig, 0.05, markerColor(rig), 0.42, 0.95);
   }
 
   // the body just handed over: fade from the moment the value CHANGED, so a
@@ -3326,6 +3326,13 @@ function updateControlMarkers(scene: Scene, now: number) {
     markerFocusAt = now;
   }
   const focus = markerRig(scene.focusSlot);
+  if (now - (globalThis as any).__mkLog > 2000 || !(globalThis as any).__mkLog) {
+    (globalThis as any).__mkLog = now;
+    console.log('MK others=', JSON.stringify(scene.otherPilotSlots), 'used=', used,
+      'focus=', scene.focusSlot, 'ghost=', scene.ghostSlot,
+      'vis=', playerRigs.map(r => (r.root.visible ? 1 : 0)).join(''),
+      'sides=', playerRigs.map(r => r.kitSide).join(''));
+  }
   if (!focus) return;
   const col = markerColor(focus);
   // the pop: the ring lands oversized and snaps in over FOCUS_POP_MS, which
