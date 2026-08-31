@@ -92,6 +92,10 @@ export interface Scene {
   // necessarily their own row. The camera always keeps it in frame, or a
   // switch to a man off-screen leaves you blind.
   focusSlot?: number;
+  // The man just handed over on a switch, while the eye is still on him.
+  ghostSlot?: number;
+  // Bodies another human is driving — marked apart from the AI ones.
+  otherPilotSlots?: number[];
   replayCam?: boolean; // replay playback cuts to the goal-end camera
 }
 
@@ -103,10 +107,11 @@ const PHASE_LIVE = 2;
 const PHASE_PAUSE = 3;
 
 // Stereo position for a sound at three-x (the along-pitch axis, which IS
-// screen horizontal). The rail camera trucks, so the pan is measured from
-// where the camera currently stands — otherwise a kick dead centre of frame
-// at the far end would still hard-pan to one ear.
-const panOf = (x: number) => Math.max(-1, Math.min(1, (x - camS) / 34));
+// screen horizontal). Measured from where the camera is LOOKING, not from
+// where it stands: the aim is centre of frame by construction, so this is
+// screen position, and a kick centre-frame at the far end stays centred
+// instead of hard-panning to one ear.
+const panOf = (x: number) => Math.max(-1, Math.min(1, (x - aimS) / 34));
 // Bounce timbre per PITCHES index: grass (soft), night grass (soft), street
 // concrete (hard slap).
 const BOUNCE_BRIGHT = [0.85, 0.85, 1.2];
@@ -147,6 +152,13 @@ let shockMesh: THREE.Mesh;
 let shockStart = -1;
 const shockPos = new THREE.Vector3();
 let auraRing: THREE.Mesh;
+// Control markers (see updateControlMarkers): the ring and chevron on the
+// body this client drives, the ring fading on the one it just left, and a
+// dimmer ring per body another human is driving.
+let focusRing: THREE.Mesh;
+let focusChevron: THREE.Mesh;
+let ghostRing: THREE.Mesh;
+let pilotRings: THREE.Mesh[] = [];
 let sun: THREE.DirectionalLight;
 let detailGroup: THREE.Group; // crowd stands + umpire chair — droppable scenery
 // two-frame crowd animation: stands alternate between the A/B textures on a
@@ -380,6 +392,7 @@ interface PlayerRig {
   gloveL: THREE.Mesh; gloveR: THREE.Mesh; // keeper gloves — hidden otherwise
   charId: number; // character currently dressed on this rig
   keeperKit: boolean; // which kit that character is wearing
+  kitSide: number; // team kit on it: 0 home, 1 away, -1 the character's own
   head: THREE.Mesh;
   pose: Pose;
   yaw: number; // current facing (blended toward movement / ball)
@@ -1024,18 +1037,25 @@ function buildHair(grp: THREE.Group, mat: THREE.MeshLambertMaterial, style: Hair
   }
 }
 
-// Dress a rig as a character: kit colors, skin tone, face, hair, body. The
-// kit is part of the identity check — a rig handed to a keeper has to be
-// re-dressed even when the character on it hasn't changed.
-function applyCharacter(rig: PlayerRig, char: Character, keeper = false) {
-  if (rig.charId === char.id && rig.keeperKit === keeper) return;
+// Dress a rig as a character in a side's kit: skin tone, face, hair and body
+// are the CHARACTER's, the shirt is the TEAM's. Kit and role are both part of
+// the identity check — a rig is handed to the other side's seat, or to a
+// keeper, mid-match, and has to be re-dressed even when the character on it
+// hasn't changed. Side -1 = no team (the select-screen previews).
+function applyCharacter(rig: PlayerRig, char: Character, keeper = false, side = -1) {
+  if (rig.charId === char.id && rig.keeperKit === keeper && rig.kitSide === side) return;
   rig.charId = char.id;
-  rig.torsoMat.color.setHex(char.color);
+  rig.kitSide = side;
+  // Off the pitch there is no team to belong to, so the character wears its
+  // own color — the one the select cards' own styling is keyed to.
+  const kit: Kit | null = keeper ? KEEPER_KIT : KITS[side] ?? null;
+  const shirt = kit ? kit.shirt : char.color;
+  rig.torsoMat.color.setHex(shirt);
   rig.torsoMat.map = makeShirtTexture(char.id);
   rig.torsoMat.needsUpdate = true;
-  rig.sleeveMatL.color.setHex(char.color);
-  rig.sleeveMatR.color.setHex(char.color);
-  rig.accentMat.color.setHex(char.color);
+  rig.sleeveMatL.color.setHex(shirt);
+  rig.sleeveMatR.color.setHex(shirt);
+  rig.accentMat.color.setHex(kit ? kit.trim : char.color);
   rig.skinMat.color.setHex(char.skin);
   rig.headMat.map = makeFaceTexture(char);
   rig.headMat.needsUpdate = true;
@@ -1043,7 +1063,7 @@ function applyCharacter(rig: PlayerRig, char: Character, keeper = false) {
   buildBody(rig, char);
   buildHair(rig.hairGroup, rig.hairMat, char.hairStyle);
   applyPhysique(rig, char);
-  applyKeeperKit(rig, keeper); // after buildBody — it re-points its materials
+  applyKit(rig, kit, keeper); // after buildBody — it re-points its materials
 }
 
 // Body proportions mirror the stat sheet, so you can read an athlete at a
@@ -1089,7 +1109,10 @@ function applyPhysique(rig: PlayerRig, char: Character) {
 // ---------------------------------------------------------------------------
 
 // Shared static materials — per-character colors live on the rig's own mats.
+// SHORTS_MAT/SOCK_MAT are what every body build reaches for: they are the
+// kit-piece PLACEHOLDERS, re-pointed to the wearer's real kit by applyKit.
 const SHORTS_MAT = new THREE.MeshLambertMaterial({ color: COLORS.shorts });
+const SOCK_MAT = new THREE.MeshLambertMaterial({ color: COLORS.shorts });
 const SHOE_MAT = new THREE.MeshLambertMaterial({ color: COLORS.shoe });
 const SOLE_MAT = new THREE.MeshLambertMaterial({ color: 0x50525a });
 const WHITE_MAT = new THREE.MeshLambertMaterial({ color: 0xf0f2f4 });
@@ -1097,31 +1120,79 @@ const WOOD_MAT = new THREE.MeshLambertMaterial({ color: 0x7a4a26 });
 const DARK_MAT = new THREE.MeshLambertMaterial({ color: 0x23252d });
 const METAL_MAT = new THREE.MeshLambertMaterial({ color: 0xb8bcc4 });
 
+// ---------------------------------------------------------------------------
+// Team kits. The shirt belongs to the SIDE, never to the character: bot
+// fillers all play the same character, so a shirt keyed off the roster puts
+// both squads out in one color and nobody can follow their own match. The
+// character still reads off everything else — face, hair, physique, body
+// build and its squad number.
+//
+// The pair has to separate three ways at broadcast distance: from each other,
+// from the turf (#4aa338 by day, #2f7a2c under lights) and from the keepers'
+// lime. Red vs royal blue does all three, and survives red-green color
+// blindness, where the two read as brown and blue rather than as one color.
+// ---------------------------------------------------------------------------
+interface Kit {
+  shirt: number;
+  trim: number; // collar band, belt, boot flash
+  shorts: THREE.MeshLambertMaterial;
+  socks: THREE.MeshLambertMaterial;
+  marker: number; // control ring/chevron: the shirt, lifted to read on grass
+}
+const KIT_WHITE = 0xf1f4f8;
+const KITS: Kit[] = [
+  {
+    // HOME — all red, the loudest thing that can stand on a green field
+    shirt: 0xd8232f,
+    trim: KIT_WHITE,
+    shorts: new THREE.MeshLambertMaterial({ color: 0xc11e2a }),
+    socks: new THREE.MeshLambertMaterial({ color: 0xd8232f }),
+    marker: 0xff6152,
+  },
+  {
+    // AWAY — royal blue over white shorts. Royal, not navy: under the night
+    // pitch's floodlights a navy kit collapses into its own shadow.
+    shirt: 0x2f62dc,
+    trim: KIT_WHITE,
+    shorts: new THREE.MeshLambertMaterial({ color: 0xeef1f6 }),
+    socks: new THREE.MeshLambertMaterial({ color: 0x2f62dc }),
+    marker: 0x6fb0ff,
+  },
+];
 // Keeper kit — lime shirt, dark shorts, white gloves, so the one body per
 // side that may handle the ball reads as the keeper from the halfway line.
-const KEEPER_SHIRT = 0xc8f000;
+// It overrides the team kit, which is why both sides' keepers look alike.
 const KEEPER_SHORTS_MAT = new THREE.MeshLambertMaterial({ color: 0x1b2030 });
+const KEEPER_KIT: Kit = {
+  shirt: 0xc8f000,
+  trim: 0x1b2030,
+  shorts: KEEPER_SHORTS_MAT,
+  socks: new THREE.MeshLambertMaterial({ color: 0x1b2030 }),
+  marker: 0xc8f000,
+};
 const GLOVE_MAT = new THREE.MeshLambertMaterial({ color: 0xf6f8fa });
 const GLOVE_GEO = new THREE.BoxGeometry(0.38, 0.44, 0.36);
 
-// Put a rig in (or out of) the keeper kit. Everything here is a swap of
-// references to materials and meshes that already exist — a rig can change
-// role, and allocating a material per frame would leak one per frame.
-// The outfield shirt color needs no restoring: applyCharacter re-sets it from
-// the character immediately before calling this.
-function applyKeeperKit(rig: PlayerRig, keeper: boolean) {
+// Which materials count as a kit piece, whichever kit they came from. Bodies
+// are always rebuilt against the placeholders, but matching the whole set
+// keeps the swap correct even for a rig re-kitted without a rebuild.
+const KIT_SHORTS = new Set<THREE.Material>([SHORTS_MAT, KEEPER_KIT.shorts, ...KITS.map(k => k.shorts)]);
+const KIT_SOCKS = new Set<THREE.Material>([SOCK_MAT, KEEPER_KIT.socks, ...KITS.map(k => k.socks)]);
+
+// Put a rig in a kit. The shirt colors are already on the rig's own
+// materials by the time this runs; what's left is re-pointing the shared
+// shorts/socks meshes and showing the keeper's gloves. Every one of these is
+// a swap between materials and meshes that ALREADY EXIST — a rig changes
+// side and role mid-match, and allocating here would leak one per change.
+function applyKit(rig: PlayerRig, kit: Kit | null, keeper: boolean) {
   rig.keeperKit = keeper;
-  if (keeper) {
-    rig.torsoMat.color.setHex(KEEPER_SHIRT);
-    rig.sleeveMatL.color.setHex(KEEPER_SHIRT);
-    rig.sleeveMatR.color.setHex(KEEPER_SHIRT);
-  }
-  // every body build hands its shorts and hems the shared SHORTS_MAT
-  const from = keeper ? SHORTS_MAT : KEEPER_SHORTS_MAT;
-  const to = keeper ? KEEPER_SHORTS_MAT : SHORTS_MAT;
+  const shorts = kit ? kit.shorts : SHORTS_MAT;
+  const socks = kit ? kit.socks : SOCK_MAT;
   rig.root.traverse(o => {
-    const m = o as THREE.Mesh;
-    if (m.material === from) m.material = to;
+    const mat = (o as THREE.Mesh).material as THREE.Material | undefined;
+    if (!mat) return;
+    if (KIT_SHORTS.has(mat)) (o as THREE.Mesh).material = shorts;
+    else if (KIT_SOCKS.has(mat)) (o as THREE.Mesh).material = socks;
   });
   rig.gloveL.visible = keeper;
   rig.gloveR.visible = keeper;
@@ -1418,7 +1489,7 @@ function buildBody(rig: PlayerRig, char: Character) {
       padd(hp, new THREE.CylinderGeometry(0.7, 0.7, 0.14, 16), acc, 0, 2.62, 0);
       humanHead(rig, false);
       for (const rt of sides) {
-        stdLeg(rig, rt, { r: 0.16, len: 0.72, calfR: 0.13, calfLen: 0.68, mat: skin, sock: WHITE_MAT, foot: 'shoe', footMat: DARK_MAT });
+        stdLeg(rig, rt, { r: 0.16, len: 0.72, calfR: 0.13, calfLen: 0.68, mat: skin, sock: SOCK_MAT, foot: 'shoe', footMat: DARK_MAT });
         stdArm(rig, rt, { sleeve: { r: 0.2, len: 0.4 }, r: 0.13, len: 0.5, foreR: 0.115, foreLen: 0.52, mat: skin, wrist: null, handR: 0.15 });
       }
       break;
@@ -1491,7 +1562,7 @@ function buildBody(rig: PlayerRig, char: Character) {
       stdShorts(rig);
       humanHead(rig);
       for (const rt of sides) {
-        stdLeg(rig, rt, { r: 0.24, len: 0.75, calfR: 0.19, calfLen: 0.7, mat: skin, hem: SHORTS_MAT, sock: SHOE_MAT, foot: 'shoe' });
+        stdLeg(rig, rt, { r: 0.24, len: 0.75, calfR: 0.19, calfLen: 0.7, mat: skin, hem: SHORTS_MAT, sock: SOCK_MAT, foot: 'shoe' });
         stdArm(rig, rt, { r: 0.17, len: 0.55, foreR: 0.15, foreLen: 0.55, mat: skin });
       }
     }
@@ -1584,6 +1655,7 @@ function makePlayerRig(side: number, intoScene: THREE.Scene = scene3): PlayerRig
     gloveL, gloveR,
     charId: -1,
     keeperKit: false,
+    kitSide: -1,
     head,
     pose: { ...ZERO_POSE },
     yaw: side === 0 ? Math.PI : 0,
@@ -2446,7 +2518,7 @@ function buildEnvironment() {
   const cosT = Math.cos(STAND_TILT);
   edges.forEach((e, i) => {
     const near = i === 4;
-    const hs = near ? 0.55 : i === 3 || i === 5 ? 0.8 : 1;
+    const hs = near ? 0.34 : i === 3 || i === 5 ? 0.62 : 1;
     const H = STAND_H * hs;
     // widened by the lean-back offset so adjacent tiers overlap at the top
     // instead of opening sky wedges at the octagon corners
@@ -2721,6 +2793,34 @@ function buildScene() {
   auraRing.visible = false;
   scene3.add(auraRing);
 
+  // Control markers. Each ring carries its own material because they run at
+  // different colors and opacities in the same frame; the geometry is small
+  // enough that sharing it would only complicate disposal.
+  const mkRing = (opacity: number) => {
+    const m = new THREE.Mesh(
+      new THREE.RingGeometry(1.15, 1.58, 40),
+      new THREE.MeshBasicMaterial({
+        color: 0xffffff, transparent: true, opacity, side: THREE.DoubleSide, depthWrite: false,
+      })
+    );
+    m.rotation.x = -Math.PI / 2;
+    m.visible = false;
+    scene3.add(m);
+    return m;
+  };
+  focusRing = mkRing(0.8);
+  ghostRing = mkRing(0.5);
+  pilotRings = Array.from({ length: RIG_COUNT }, () => mkRing(0.28));
+  focusChevron = new THREE.Mesh(
+    new THREE.ConeGeometry(0.44, 0.78, 4),
+    new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.95, depthWrite: false })
+  );
+  focusChevron.rotation.set(Math.PI, Math.PI / 4, 0); // point down, corner-on
+  focusChevron.visible = false;
+  scene3.add(focusChevron);
+  markerFocusSlot = -1;
+  markerGhostSlot = -1;
+
   applyResolution();
   applyShadows();
   applyGrade();
@@ -2836,7 +2936,7 @@ function disposeScene() {
 // dollies in and out to hold the play in shot. Every distance here is a
 // fraction of the pitch, so changing the geometry constants carries the whole
 // framing with it.
-const CAM_ELEV = THREE.MathUtils.degToRad(33);
+const CAM_ELEV = THREE.MathUtils.degToRad(26);
 const CAM_SIN = Math.sin(CAM_ELEV);
 const CAM_COS = Math.cos(CAM_ELEV);
 const CAM_FOV = 36;
@@ -2845,9 +2945,10 @@ const S_LIMIT = PITCH_HALF_LEN * 0.65; // the rail stops short of the goal ends
 const R_DEFAULT = PITCH_HALF_LEN * 1.14;
 const R_MIN = PITCH_HALF_LEN * 0.95;
 const R_MAX = PITCH_HALF_LEN * 1.4;
-// The aim sits a little toward the camera's own touchline: that is what sets
-// the horizon and keeps the near touchline off the bottom edge of the frame.
-const CAM_AIM_W = PITCH_HALF_WID * 0.28;
+// Base offset of the aim toward the camera's own touchline. It is only a
+// floor's worth of the story — see wFloor below, which solves the rest of it
+// against the boom so the near touchline never falls out of frame.
+const CAM_AIM_W = PITCH_HALF_WID * 0.18;
 const CAM_AIM_Y = 1.6;
 // Past this the aim did not move, it TELEPORTED (a restart spot the far side
 // of the pitch, the cut back from a replay). Easing across it would sweep the
@@ -2904,9 +3005,9 @@ function applyShake(now: number) {
 function updateBroadcastCamera(scene: Scene, dt: number, now: number) {
   const { flip, ball } = scene;
 
-  // --- REPLAY: low and behind the goal that was attacked. Cutting from a 33°
-  // side rail to a 9° goal-end shot is a real edit, and it is what sells the
-  // goal — a replay on the live rig is just the same shot again. -----------
+  // --- REPLAY: low and behind the goal that was attacked. Cutting from the
+  // side rail to a near-ground goal-end shot is a real edit, and it is what
+  // sells the goal — a replay on the live rig is the same shot again. ------
   if (scene.replayCam) {
     const fov = fovForAspect(40);
     if (Math.abs(camera.fov - fov) > 0.05) {
@@ -2925,7 +3026,9 @@ function updateBroadcastCamera(scene: Scene, dt: number, now: number) {
     camera.lookAt(replayLook);
     camera.updateMatrixWorld();
     camReady = false; // the cut back to live snaps; it does not sweep
-    prevCamPhase = scene.phase;
+    // prevCamPhase is deliberately NOT touched here: replay frames are
+    // recorded LIVE ones, and letting them rewrite it would re-arm the goal
+    // punch the moment we cut back to the (still paused) live camera.
     return;
   }
   replayLook = null;
@@ -2936,9 +3039,25 @@ function updateBroadcastCamera(scene: Scene, dt: number, now: number) {
     camera.updateProjectionMatrix();
   }
 
-  // The play, in camera coordinates: s along the pitch, w across it.
-  const bs = ball ? ball.y * flip : 0;
-  const bw = ball ? ball.x * flip : 0;
+  // The play, in camera coordinates: s along the pitch, w across it. A
+  // stoppage DEACTIVATES the ball, so with no ball to watch fall back to
+  // where the bodies are — swinging back to the halfway line every time play
+  // stops would be motion sickness, not television.
+  let bs = 0;
+  let bw = 0;
+  if (ball) {
+    bs = ball.y * flip;
+    bw = ball.x * flip;
+  } else if (scene.players.length) {
+    for (const pl of scene.players) {
+      bs += pl.y * flip;
+      bw += pl.x * flip;
+    }
+    bs /= scene.players.length;
+    bw /= scene.players.length;
+  } else {
+    bs = aimS; // an empty pitch (the pitch-select preview): hold
+  }
 
   // Look-ahead comes from POSSESSION, not velocity. The ball sticks to its
   // owner and is knocked ahead of his run, so a dribbled ball's velocity
@@ -2985,7 +3104,9 @@ function updateBroadcastCamera(scene: Scene, dt: number, now: number) {
   }
 
   // --- ease, or snap when the aim jumped -----------------------------------
-  const jump = !camReady || Math.abs(tgtS - aimS) > SNAP_DIST;
+  // Only a real ball can teleport: with none to watch the target is a slow
+  // centroid, and cutting to it would turn every stoppage into an edit.
+  const jump = !camReady || (!!ball && Math.abs(tgtS - aimS) > SNAP_DIST);
   if (jump) {
     aimS = tgtS;
   } else {
@@ -2997,7 +3118,22 @@ function updateBroadcastCamera(scene: Scene, dt: number, now: number) {
       aimS += (want - aimS) * (1 - Math.exp(-7.5 * dt));
     }
   }
-  const wantW = CAM_AIM_W + THREE.MathUtils.clamp(tgtW * 0.35, -7, 7);
+  // Pushing the aim toward the camera's own touchline is what sets the
+  // horizon. How far it has to go depends on the boom, so solve it: the near
+  // touchline is the frame's anchor side-on, and a picture that has lost it
+  // feels unmoored. Solving the bottom ray for the aim keeps that line a
+  // constant few units inside the bottom edge at any boom length, elevation,
+  // FOV or aspect — portrait included.
+  const tanDown = Math.tan(CAM_ELEV + THREE.MathUtils.degToRad(fovV / 2));
+  const wFloor = THREE.MathUtils.clamp(
+    PITCH_HALF_WID + 2 - camR * (CAM_COS - CAM_SIN / tanDown) + CAM_AIM_Y / tanDown,
+    -2,
+    PITCH_HALF_WID * 0.6
+  );
+  const wantW = Math.max(
+    wFloor,
+    CAM_AIM_W + THREE.MathUtils.clamp(tgtW * 0.35, -7, 7)
+  );
   aimW = jump ? wantW : aimW + (wantW - aimW) * (1 - Math.exp(-4 * dt));
   const truck = THREE.MathUtils.clamp(K_TRUCK * aimS, -S_LIMIT, S_LIMIT);
   camS = jump ? truck : camS + (truck - camS) * (1 - Math.exp(-3.2 * dt));
@@ -3109,6 +3245,111 @@ const AURA_PALETTES: [number, number][] = [
 const chargePalette: number[] = new Array(RIG_COUNT).fill(0); // per-rig palette rolled per charge
 const lastChargeAt: number[] = new Array(RIG_COUNT).fill(-1e9); // per-rig: detects a fresh charge
 
+// ---------------------------------------------------------------------------
+// Control markers
+// ---------------------------------------------------------------------------
+// Ten bodies and one stick: with nothing under your feet you cannot tell
+// which pair of boots you are driving, and a switch looks like the button did
+// nothing. So a ring in the team's color under the body you hold, a chevron
+// over its head, a ring that fades on the body you just left so the eye
+// follows the handoff, and a dimmer ring on any body ANOTHER human holds —
+// the server will never hand those over, and unmarked they read as switch
+// targets that silently refuse.
+// Every mesh here is built once by buildScene and only ever toggled and
+// re-colored: the markers move every frame, so allocating would cost a mesh
+// a frame for a whole half.
+const FOCUS_POP_MS = 200;
+const GHOST_FADE_MS = 250;
+let markerFocusSlot = -1; // the slot the ring is on — a change is the handoff
+let markerFocusAt = -1;
+let markerGhostSlot = -1;
+let markerGhostAt = -1;
+
+function markerRig(slot: number | undefined): PlayerRig | null {
+  if (slot === undefined || slot < 0 || slot >= playerRigs.length) return null;
+  const rig = playerRigs[slot];
+  return rig && rig.root.visible ? rig : null;
+}
+
+// A marker is the TEAM's color, keeper or not — it answers "which of these
+// are mine", not "what is this man's job". Dressing the rig already recorded
+// its side, so this needs no second pass over the roster.
+function markerColor(rig: PlayerRig): number {
+  return (KITS[rig.kitSide] ?? KITS[0]).marker;
+}
+
+function placeRing(ring: THREE.Mesh, rig: PlayerRig, y: number, color: number, opacity: number, scale: number) {
+  ring.visible = true;
+  ring.position.set(rig.root.position.x, y, rig.root.position.z);
+  ring.scale.set(scale, scale, scale);
+  const mat = ring.material as THREE.MeshBasicMaterial;
+  mat.color.setHex(color);
+  mat.opacity = opacity;
+}
+
+function updateControlMarkers(scene: Scene, now: number) {
+  focusRing.visible = false;
+  focusChevron.visible = false;
+  ghostRing.visible = false;
+  for (const r of pilotRings) r.visible = false;
+  // Both slot lists are optional and may arrive empty for a whole match
+  // (spectating, a client that never sends them) — absent means no marker,
+  // never a marker on slot 0.
+
+  // other humans' bodies, dim
+  let used = 0;
+  for (const slot of scene.otherPilotSlots ?? []) {
+    if (used >= pilotRings.length || slot === scene.focusSlot) continue;
+    const rig = markerRig(slot);
+    if (!rig) continue;
+    placeRing(pilotRings[used++], rig, 0.05, markerColor(rig), 0.26, 0.86);
+  }
+
+  // the body just handed over: fade from the moment the value CHANGED, so a
+  // client that holds the slot for longer than the fade still gets 250 ms
+  const ghost = scene.ghostSlot ?? -1;
+  if (ghost !== markerGhostSlot) {
+    markerGhostSlot = ghost;
+    markerGhostAt = now;
+  }
+  const ghostRigNow = markerRig(scene.ghostSlot);
+  const ghostT = (now - markerGhostAt) / GHOST_FADE_MS;
+  if (ghostRigNow && ghostT < 1) {
+    // it lets go outward as it dies, which is what makes it read as a wake
+    placeRing(ghostRing, ghostRigNow, 0.06, markerColor(ghostRigNow), 0.55 * (1 - ghostT), 1 + 0.45 * ghostT);
+  }
+
+  // the body this client is driving
+  const focusSlot = scene.focusSlot ?? -1;
+  if (focusSlot !== markerFocusSlot) {
+    markerFocusSlot = focusSlot;
+    markerFocusAt = now;
+  }
+  const focus = markerRig(scene.focusSlot);
+  if (!focus) return;
+  const col = markerColor(focus);
+  // the pop: the ring lands oversized and snaps in over FOCUS_POP_MS, which
+  // is what makes a switch between two identical shirts visible at all
+  const pop = 1 - Math.min(1, Math.max(0, (now - markerFocusAt) / FOCUS_POP_MS));
+  const eased = pop * pop;
+  placeRing(
+    focusRing, focus, 0.07, col,
+    Math.min(1, 0.72 + 0.1 * Math.sin(now / 320) + 0.28 * eased),
+    1 + 0.55 * eased
+  );
+  // The chevron rides the CROWN, and physique moves that: long legs lift the
+  // whole body, so read the height off the rig rather than assuming one.
+  focusChevron.visible = true;
+  focusChevron.position.set(
+    focus.root.position.x,
+    focus.root.position.y + focus.upper.position.y + 3.5 + Math.sin(now / 340) * 0.12,
+    focus.root.position.z
+  );
+  focusChevron.scale.setScalar(1 + 0.45 * eased);
+  const cm = focusChevron.material as THREE.MeshBasicMaterial;
+  cm.color.setHex(col);
+}
+
 export function drawScene(scene: Scene) {
   if (!renderer) return;
   resizeToDisplay(renderer.domElement);
@@ -3218,7 +3459,7 @@ export function drawScene(scene: Scene) {
     const side = pl.side;
     rig.root.visible = true;
     const character = CHARACTERS[pl.characterId ?? 0];
-    if (character) applyCharacter(rig, character, pl.role === ROLE_KEEPER);
+    if (character) applyCharacter(rig, character, pl.role === ROLE_KEEPER, side);
     const pos = toThree(flip, pl.x, pl.y, 0);
     rig.root.position.x = pos.x;
     rig.root.position.z = pos.z;
@@ -3232,12 +3473,8 @@ export function drawScene(scene: Scene) {
     // Idle facing is UP THE PITCH, toward the goal this side attacks. (Keying
     // it off which half of the world you stand in — side-on, that is which
     // touchline you are nearer — spins an idle player 180° as he walks
-    // across the pitch.) A keeper faces the ball instead, always.
-    const atk = attackDir(side, flip);
-    const baseYaw =
-      pl.role === ROLE_KEEPER && ballPos3
-        ? Math.atan2(ballPos3.x - pos.x, ballPos3.z - pos.z)
-        : (atk * Math.PI) / 2;
+    // across the pitch.)
+    const baseYaw = (attackDir(side, flip) * Math.PI) / 2;
 
     // air-kick: the charge was released with nothing at the player's feet
     if (rig.prevKickTicks > 0 && !pl.kickHeld && rig.kickStart < 0) {
@@ -3251,12 +3488,15 @@ export function drawScene(scene: Scene) {
     const moving = pl.dirX !== 0 || pl.dirY !== 0;
     const striking = pl.kickHeld || rig.kickStart >= 0;
 
-    // facing priority: ball while striking > movement direction > face upfield
+    // facing priority: ball while striking > movement direction > face upfield.
+    // A keeper is the exception at every step — he shuffles sideways along his
+    // line and must never turn his back on the ball to do it.
     let yawTarget = baseYaw;
     let yawRate = 10;
-    if (striking && ballPos3) {
+    const keeper = pl.role === ROLE_KEEPER;
+    if ((striking || keeper) && ballPos3) {
       yawTarget = Math.atan2(ballPos3.x - pos.x, ballPos3.z - pos.z);
-      yawRate = 18;
+      yawRate = striking ? 18 : 12;
     } else if (moving) {
       const mv = toThree(flip, pl.dirX, pl.dirY, 0);
       yawTarget = Math.atan2(mv.x, mv.z);
@@ -3451,6 +3691,10 @@ export function drawScene(scene: Scene) {
       rig.head.rotation.x -= rig.head.rotation.x * ha;
     }
   }
+
+  // markers go on last: they follow the rig roots, which the loop above has
+  // just finished moving (the strike step-in included)
+  updateControlMarkers(scene, now);
 
   // --- ball: ALWAYS its true trajectory — we never manipulate the ball ------
   if (ball) {

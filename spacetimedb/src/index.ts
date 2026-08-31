@@ -799,10 +799,15 @@ function unitName(ctx: Ctx, lobbyId: bigint, captainId: Identity): string {
 // ACE BOT 3" once fillers are on the pitch — and winVerb's ' & ' test would
 // pluralize a solo player's win. (isBot = this row is not a person.)
 function teamName(players: PlayerRow[], side: number): string {
-  const names = players
-    .filter(p => p.side === side && p.role === ROLE_OUTFIELD && !p.isBot)
-    .sort((a, b) => a.teamSlot - b.teamSlot)
-    .map(p => p.name || 'PLAYER');
+  const outfield = players
+    .filter(p => p.side === side && p.role === ROLE_OUTFIELD)
+    .sort((a, b) => a.teamSlot - b.teamSlot);
+  // Humans if there are any; otherwise the named lobby bots (a practice
+  // opponent, a bracket filler) so a bot side still reads as an opponent.
+  // Never the per-match fillers: that is what gives "ALICE & ACE BOT 2".
+  const named = outfield.filter(p => !p.isBot);
+  const rows = named.length ? named : outfield.filter(p => !p.matchBot);
+  const names = rows.map(p => p.name || 'PLAYER');
   return names.join(' & ') || `Side ${side + 1}`;
 }
 

@@ -11,6 +11,7 @@ type Handlers = {
   kick: (kind: number) => void;
   kickRelease: () => void;
   tackle: () => void;
+  switchPlayer: () => void;
   chat: () => void;
 };
 
@@ -186,6 +187,8 @@ export function initTouch(h: Handlers) {
   initButton($('touch-chip'), () => h.kick(1), h.kickRelease);
   // A slide is a one-shot lunge — there is nothing to release.
   initButton($('touch-slide'), h.tackle, () => {});
+  // Switching is one-shot too; repeated taps cycle through your team-mates.
+  initButton($('touch-switch'), h.switchPlayer, () => {});
   initSprint($('touch-sprint'));
   $('touch-chat').addEventListener('click', e => {
     e.preventDefault();

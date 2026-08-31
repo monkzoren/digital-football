@@ -2892,6 +2892,17 @@
       box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4), inset 0 2px 6px rgba(255, 255, 255, 0.18);
       margin-bottom: min(84px, 22cqmin); /* top of the diagonal */
     }
+    /* SWITCH: pick the team-mate you want. Same size as SPRINT so the two
+       utility pills read as a pair above the action fan. */
+    #touch-switch {
+      width: min(44px, 12cqmin);
+      aspect-ratio: 1;
+      font-size: min(19px, 5cqmin);
+      border: 2px solid rgba(120, 200, 255, 0.7);
+      background: rgba(10, 16, 60, 0.45);
+      opacity: 0.85;
+      margin-bottom: min(140px, 36cqmin); /* above SPRINT */
+    }
     /* SPRINT is a latch, not a hold — a fourth thumb is not available. */
     #touch-sprint {
       width: min(44px, 12cqmin);
@@ -3097,6 +3108,7 @@
       <div id="touch-home">MOVE</div>
       <div id="touch-stick" class="hidden"><div id="touch-knob"></div></div>
       <div id="touch-actions">
+        <button id="touch-switch" class="touch-btn" title="Switch player">⇄</button>
         <button id="touch-sprint" class="touch-btn" title="Sprint (latch)">⚡</button>
         <button id="touch-slide" class="touch-btn">SLIDE</button>
         <button id="touch-chip" class="touch-btn">CHIP</button>

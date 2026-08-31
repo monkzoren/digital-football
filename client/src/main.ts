@@ -1516,6 +1516,9 @@ const MOVE_KEYS: Record<string, [number, number]> = {
 const KICK_KEYS = new Set(['Space', 'KeyJ']);
 const CHIP_KEYS = new Set(['KeyK', 'ShiftRight']);
 const SLIDE_KEYS = new Set(['KeyL', 'ControlLeft', 'ControlRight']);
+// Switch to another team-mate. Q and Tab are where football games put it;
+// Tab needs preventDefault or the browser walks focus out of the canvas.
+const SWITCH_KEYS = new Set(['KeyQ', 'Tab']);
 const SPRINT_KEYS = new Set(['ShiftLeft']);
 
 function pressKick(kind: number) {
@@ -1572,6 +1575,7 @@ const GP_KICK = 0;
 const GP_CHIP = 1;
 const GP_SLIDE = 2;
 const GP_SPRINT = 7;
+const GP_SWITCH = 4; // left bumper, where every football game puts it
 const gpPrev: Record<number, boolean> = {};
 // Read by the frame loop alongside the stick, so the sprint bit rides along
 // on the same setInput the direction does.
@@ -1596,6 +1600,7 @@ function pollGamepad(): [number, number] | null {
     if (e.released) conn.reducers.kickRelease({});
   }
   if (edge(GP_SLIDE).pressed) conn.reducers.tackle({});
+  if (edge(GP_SWITCH).pressed) conn.reducers.switchPlayer({});
   padSprint = edge(GP_SPRINT).down || (gp.buttons[GP_SPRINT]?.value ?? 0) > 0.4;
   const ax = gp.axes[0] ?? 0;
   const ay = gp.axes[1] ?? 0;
@@ -1853,6 +1858,10 @@ initTouch({
     unlockAudio();
     conn.reducers.tackle({});
   },
+  switchPlayer: () => {
+    unlockAudio();
+    conn.reducers.switchPlayer({});
+  },
   chat: () => {
     const me = getMyPlayer();
     if (me && me.lobbyId !== 0n && !chatOpen) openChat();
@@ -1876,6 +1885,11 @@ window.addEventListener('keydown', e => {
   } else if (SLIDE_KEYS.has(e.code)) {
     e.preventDefault();
     if (!e.repeat) conn.reducers.tackle({});
+  } else if (SWITCH_KEYS.has(e.code)) {
+    e.preventDefault();
+    // repeats DO fire: holding switch cycles through your team-mates, which
+    // is how you reach the man you actually want
+    conn.reducers.switchPlayer({});
   } else if (SPRINT_KEYS.has(e.code)) {
     e.preventDefault();
     pressed.add(e.code); // held modifier — the frame loop reads it
@@ -1958,10 +1972,33 @@ function halfLabel(match: any): string {
   return HALF_NAMES[Math.min(HALF_NAMES.length - 1, Math.max(0, (match.half ?? 1) - 1))];
 }
 
-/** mm:ss left in the current half. Golden goal runs on past 0 as sudden death. */
+/**
+ * Football clocks count UP, and they do not reset at half time: the second
+ * half starts where the first ended. The server counts DOWN within a half
+ * (clockTicks), so elapsed is the half's length minus what is left, plus the
+ * halves already played. Golden goal runs on past full time as sudden death.
+ */
 function clockText(match: any): string {
-  const secs = Math.ceil((match.clockTicks ?? 0) / TICK_HZ);
-  return fmtClock(secs);
+  const left = Math.ceil((match.clockTicks ?? 0) / TICK_HZ);
+  const half = match.half ?? 1;
+  const played = half >= 3 ? HALF_SECONDS * 2 : HALF_SECONDS * (half - 1);
+  const lenOfThis = half >= 3 ? OT_SECONDS : HALF_SECONDS;
+  // In sudden death the half's clock has expired but play continues, so this
+  // simply holds at full time rather than ticking backwards.
+  return fmtClock(played + Math.max(0, lenOfThis - left));
+}
+
+/**
+ * The match minute a goal went in, the way a scoresheet writes it. The server
+ * stores clockSecs as the seconds REMAINING in that half, so this converts to
+ * elapsed and counts from 1 (football has no 0th minute).
+ */
+function goalMinute(g: any): number {
+  const half = g.half ?? 1;
+  const lenOfThis = half >= 3 ? OT_SECONDS : HALF_SECONDS;
+  const played = half >= 3 ? HALF_SECONDS * 2 : HALF_SECONDS * (half - 1);
+  const elapsed = played + Math.max(0, lenOfThis - (g.clockSecs ?? 0));
+  return Math.floor(elapsed / 60) + 1;
 }
 
 const prevPlateScore = ['', ''];
@@ -1980,13 +2017,38 @@ function rollScore(el: HTMLElement, text: string) {
 // label (both mirror the server's naming in spacetimedb/src/index.ts).
 // Keepers are bots the server spawns per match — they never carry the label.
 function sidePlayers(players: any[], side: number): any[] {
-  return players
+  const outfield = players
     .filter(p => p.side === side && (p.role ?? 0) !== ROLE_KEEPER)
     .sort((a, b) => (a.teamSlot ?? 0) - (b.teamSlot ?? 0));
+  // Name the PEOPLE. A 5-a-side lineup is mostly bot fillers, so listing every
+  // body gives "ALICE & LM BOT & RM BOT & CB BOT". Fall back to named lobby
+  // bots (the practice opponent, a bracket filler) when a side has no humans,
+  // so "ACE BOT" still reads as an opponent rather than "TEAM 2".
+  const humans = outfield.filter(p => !p.isBot);
+  if (humans.length) return humans;
+  return outfield.filter(p => !p.matchBot);
 }
 // Which rig draws a player: the renderer keeps SQUAD_SIZE rigs per side and
 // parks every keeper on the last seat, because the module hands keepers
 // teamSlot 0 — the first outfielder's seat.
+// Remember the body control just left, for ~250 ms of fading ring.
+const GHOST_MS = 250;
+let ghostPrevSlot: number | undefined;
+let ghostSlot: number | undefined;
+let ghostAt = 0;
+function ghostSlotNow(focus: number | undefined, now: number): number | undefined {
+  if (focus !== ghostPrevSlot) {
+    // only a HANDOFF leaves a ghost — arriving from nothing (match start,
+    // leaving spectator mode) has no previous body to fade
+    if (ghostPrevSlot !== undefined && focus !== undefined) {
+      ghostSlot = ghostPrevSlot;
+      ghostAt = now;
+    }
+    ghostPrevSlot = focus;
+  }
+  return ghostSlot !== undefined && now - ghostAt < GHOST_MS ? ghostSlot : undefined;
+}
+
 function rigSlotOf(p: any): number {
   // an outfielder never takes the keeper's seat: a teamSlot past the squad
   // would index a rig (and a head annotation) that doesn't exist
@@ -2047,14 +2109,16 @@ function updatePlates(match: any, players: any[], mySide: number) {
 let prevClockKey = '';
 
 function updateClock(match: any) {
-  const secs = Math.ceil((match.clockTicks ?? 0) / TICK_HZ);
-  const key = `${secs}|${match.half}`;
+  const left = Math.ceil((match.clockTicks ?? 0) / TICK_HZ);
+  const key = `${left}|${match.half}`;
   if (key === prevClockKey) return;
   prevClockKey = key;
-  $('mc-time').textContent = fmtClock(secs);
+  // Counts UP, football-style — clockText does the conversion from the
+  // server's remaining-in-this-half. `left` is still what decides urgency:
+  // the red treatment belongs to the last half-minute of a half.
+  $('mc-time').textContent = clockText(match);
   $('mc-half').textContent = halfLabel(match);
-  // the last half-minute of a half gets the red treatment
-  clockEl.classList.toggle('urgent', secs <= 30 && match.phase === PHASE_LIVE);
+  clockEl.classList.toggle('urgent', left <= 30 && match.phase === PHASE_LIVE);
 }
 
 // Goal / restart card: the replay letterbox covers the top plates, so a
@@ -2066,7 +2130,7 @@ function updatePointCard(match: any, players: any[], goals: any[]) {
   const last = goals.length ? goals[goals.length - 1] : null;
   const scoredSide = last && match.pauseTicks > 0 ? last.side : -1;
   $('pc-tag').textContent = last && scoredSide >= 0
-    ? `${last.ownGoal ? '● OWN GOAL' : '⚽ GOAL'} — ${last.scorerName}`
+    ? `${last.ownGoal ? '● OWN GOAL' : '⚽ GOAL'} — ${last.scorerName} ${goalMinute(last)}'`
     : `● ${halfLabel(match)}`;
   for (const side of [0, 1] as const) {
     const row = $(`pc-row${side}`);
@@ -2077,7 +2141,7 @@ function updatePointCard(match: any, players: any[], goals: any[]) {
     // the scorers this side has on the sheet, newest last
     row.querySelector('.pc-pts')!.textContent = goals
       .filter(g => g.side === side)
-      .map(g => `${g.scorerName} ${g.clockSecs}'`)
+      .map(g => `${g.scorerName}${g.ownGoal ? ' (OG)' : ''} ${goalMinute(g)}'`)
       .slice(-2)
       .join(' · ');
     // whoever restarts play next — after a goal that's the side who conceded
@@ -2425,6 +2489,10 @@ let replayEndScene: Scene | null = null;
 // crowd's roar and the cut to the replay cam would all land in the same
 // instant. Hold the live cam on the celebration for a beat first.
 const REPLAY_CUT_DELAY_MS = 500;
+// BUDGET: CUT_DELAY + WINDOW/SPEED + TAIL must stay under the server's
+// GOAL_PAUSE (spacetimedb/src/index.ts), or the replay is cut off before the
+// ball crosses the line — a goal replay that never shows the goal. Today:
+// 500 + 2600/0.55 + 700 = 5927 ms against a 7500 ms pause.
 let replayPendingAt = 0; // >0 while that beat runs; the cut is due at this time
 
 // ---------------------------------------------------------------------------
@@ -3997,12 +4065,15 @@ function frame() {
   // my side has claimed my seat, which after a switch is not my own row.
   const focusBody =
     myMatch && !spectating
-      ? players.find(
+      ? // the same fallback the module uses: until my first input nothing
+        // carries my seat yet, and a client that thinks it has no man to
+        // follow would put the camera into its spectator wander
+        (players.find(
           p =>
             p.side === me.side &&
             (p.role ?? 0) !== ROLE_KEEPER &&
             p.ctrlSeat === (me.teamSlot ?? 0)
-        )
+        ) ?? players.find(p => p.identity.toHexString() === myHex()))
       : undefined;
   updatePlates(viewMatch, players, mSide);
   updateClock(viewMatch);
@@ -4051,10 +4122,10 @@ function frame() {
           'B BRACKET · ENTER CHAT · 1-8 EMOTES'
         : 'ENTER CHAT · 1-8 EMOTES'
     : usingPad()
-      ? 'STICK MOVE · Ⓐ KICK (HOLD) · Ⓑ CHIP · Ⓧ SLIDE · RT SPRINT'
+      ? 'STICK MOVE · Ⓐ KICK (HOLD) · Ⓑ CHIP · Ⓧ SLIDE · LB SWITCH · RT SPRINT'
       : touchAvailable
         ? 'DRAG LEFT TO MOVE · HOLD KICK FOR POWER · ⚡ SPRINT'
-        : 'WASD MOVE · SPACE KICK (HOLD) · K CHIP · L SLIDE · SHIFT SPRINT · ESC MENU';
+        : 'WASD MOVE · SPACE KICK (HOLD) · K CHIP · L SLIDE · Q SWITCH · SHIFT SPRINT';
   if (spectating) {
     // no standing banner — the nameplates and the bug carry the context, so
     // mid-pitch text stays reserved for goals and restarts
@@ -4112,6 +4183,27 @@ function frame() {
     // team-mate's): the camera has to keep it in frame or a switch to a man
     // off-screen leaves me blind. Spectators have none, and get the wander.
     focusSlot: focusBody ? rigSlotOf(focusBody) : undefined,
+    // the man I just left, so the eye can follow the handoff
+    ghostSlot: ghostSlotNow(focusBody ? rigSlotOf(focusBody) : undefined, now),
+    // Bodies a TEAM-MATE is driving. Marked differently because the server
+    // will never hand them over, and without the distinction you mash switch
+    // at one and conclude the button is broken.
+    //
+    // Keyed on the control token, not on isBot: a team-mate who has switched
+    // is driving a FILLER's row, so an isBot test would miss exactly the case
+    // this exists for. Restricted to my own side — an opponent's controlled
+    // man is not something I could ever switch to.
+    otherPilotSlots:
+      spectating || !me
+        ? []
+        : players
+            .filter(
+              p =>
+                p.side === me.side &&
+                (p.ctrlSeat ?? 255) !== 255 &&
+                p !== focusBody
+            )
+            .map(p => rigSlotOf(p)),
   };
 
   // ----- replay recording + playback -----
