@@ -1611,10 +1611,34 @@ function pollGamepad(): [number, number] | null {
   return [dx, dy];
 }
 
+/**
+ * Screen-space stick -> world direction.
+ *
+ * The renderer TRANSPOSES the world: `toThree(flip, wx, wy, wz)` is
+ * `(wy*flip, wz, wx*flip)`, so screen-horizontal is world Y and screen-DEPTH
+ * is world X, with the camera parked at +z looking toward -z. Sending the
+ * stick straight through as (x, y) — which is what the old tennis camera,
+ * looking down the length of the pitch, wanted — rotates every control by 90
+ * degrees and makes the game unplayable.
+ *
+ * Right on screen  = +three.x = wy*flip increasing  -> dirY = +dx*flip
+ * Up the screen    = -three.z = wx*flip decreasing  -> dirX = -dy*flip
+ *
+ * `flip` keeps both sides attacking screen-right, and it cancels correctly
+ * here: it is applied to the same axes the renderer applies it to.
+ */
 function sendInput(dx: number, dy: number, sprint: boolean) {
   const flip = currentFlip();
-  const dirX = Math.sign(dx) * flip;
-  const dirY = Math.sign(dy) * flip;
+  const dirX = -Math.sign(dy) * flip;
+  const dirY = Math.sign(dx) * flip;
+  // A handover gives me a different body, and this send is deduped against
+  // the last one — so without re-arming here, the new man would never be
+  // told what the stick is doing and would stand (or run) on whatever he
+  // inherited until I physically changed direction.
+  if (controlSeq !== lastSentSeq) {
+    lastSentSeq = controlSeq;
+    lastSent = { dirX: NaN, dirY: NaN, sprint: !sprint };
+  }
   if (dirX !== lastSent.dirX || dirY !== lastSent.dirY || sprint !== lastSent.sprint) {
     lastSent = { dirX, dirY, sprint };
     conn.reducers.setInput({ dirX, dirY, sprint });
@@ -2047,6 +2071,18 @@ function ghostSlotNow(focus: number | undefined, now: number): number | undefine
     ghostPrevSlot = focus;
   }
   return ghostSlot !== undefined && now - ghostAt < GHOST_MS ? ghostSlot : undefined;
+}
+
+// Bumped whenever control lands on a different body, so sendInput knows to
+// re-state the stick to the new man.
+let controlSeq = 0;
+let lastSentSeq = 0;
+let controlBodyKey = '';
+function noteControlBody(key: string) {
+  if (key !== controlBodyKey) {
+    controlBodyKey = key;
+    controlSeq++;
+  }
 }
 
 function rigSlotOf(p: any): number {
@@ -4075,6 +4111,7 @@ function frame() {
             p.ctrlSeat === (me.teamSlot ?? 0)
         ) ?? players.find(p => p.identity.toHexString() === myHex()))
       : undefined;
+  noteControlBody(focusBody ? focusBody.identity.toHexString() : '');
   updatePlates(viewMatch, players, mSide);
   updateClock(viewMatch);
   updatePointCard(viewMatch, players, goals);

@@ -3123,7 +3123,10 @@ function bindPilot(ctx: Ctx, me: PlayerRow, from: PlayerRow, to: PlayerRow, lock
   ctx.db.player.identity.update({
     ...target,
     ctrlSeat: me.teamSlot,
-    dirX: stickX, dirY: stickY, sprinting: sprint,
+    dirX: stickX, dirY: stickY,
+    // clear the AI's heading with the same write, or it survives the handover
+    mvX: stickX, mvY: stickY,
+    sprinting: sprint,
     kickHeld: false, kickTicks: 0,
   });
   // Re-read the person before writing their bookkeeping: when `from` IS this
@@ -3953,10 +3956,15 @@ export const game_tick = spacetimedb.reducer(
       let speed = PLAYER_SPEED * st.speed;
       if (wantSprint) speed *= SPRINT_MUL;
       if (owns) speed *= DRIBBLE_MUL;
-      // Analog heading. A human's stick is eight-way so mv == dir for them;
-      // a bot steers on a real unit vector and stops zig-zagging.
-      const hx = cur.mvX !== 0 || cur.mvY !== 0 ? cur.mvX : cur.dirX;
-      const hy = cur.mvX !== 0 || cur.mvY !== 0 ? cur.mvY : cur.dirY;
+      // Analog heading, chosen by WHO IS DRIVING — never by "is mv set".
+      // A body handed to a human still carries the AI's last unit vector, and
+      // the client dedupes set_input against its last send, so an mv-first
+      // rule leaves the new man sprinting off on the bot's heading and
+      // ignoring the stick until the player happens to change direction.
+      // That is the difference between a footballer and a runaway.
+      const human = cur.ctrlSeat !== CTRL_NONE;
+      const hx = human ? cur.dirX : cur.mvX;
+      const hy = human ? cur.dirY : cur.mvY;
       const len = Math.hypot(hx, hy) || 1;
       let x = clamp(cur.x + (hx / len) * speed * DT, -P_BOUNDS_X, P_BOUNDS_X);
       let y = clamp(cur.y + (hy / len) * speed * DT, -P_BOUNDS_Y, P_BOUNDS_Y);
