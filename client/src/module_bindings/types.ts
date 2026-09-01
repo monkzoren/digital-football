@@ -79,6 +79,12 @@ export const Book = __t.object("Book", {
 });
 export type Book = __Infer<typeof Book>;
 
+export const BuildInfo = __t.object("BuildInfo", {
+  id: __t.u64(),
+  build: __t.string(),
+});
+export type BuildInfo = __Infer<typeof BuildInfo>;
+
 export const Chat = __t.object("Chat", {
   id: __t.u64(),
   lobbyId: __t.u64(),

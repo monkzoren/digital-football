@@ -27,6 +27,14 @@ export const DATABASE_NAME =
 // extrapolation is wall-clock based and needs no tick rate.
 export const TICK_HZ = 30;
 
+// THE BUILD STAMP — bump in lockstep with MODULE_BUILD in
+// spacetimedb/src/football.ts on every push. The game shows both stamps in
+// the corner, in red when they differ, so "which build am I actually
+// playing" is answered by looking at the screen instead of arguing about
+// git. A mismatch means the deployment updated one half and not the other —
+// almost always a module-publisher that failed or never re-ran.
+export const CLIENT_BUILD = '2026-09-01-A';
+
 // Pitch geometry — must mirror spacetimedb/src/index.ts.
 export const PITCH_HALF_LEN = 66;
 export const PITCH_HALF_WID = 34;

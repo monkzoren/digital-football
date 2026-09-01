@@ -7,7 +7,7 @@ import {
   STAMINA_MAX,
   RK_NONE, RK_KICKOFF, RK_THROWIN, RK_GOALKICK, RK_CORNER, RK_HALFTIME, RK_OVERTIME, RK_DROP, RK_FREEKICK, RK_PENALTY,
   HALF_SECONDS, OT_SECONDS, ROLE_KEEPER, SQUAD_SIZE, KEEPER_RIG_SEAT, KICK_RANGE,
-  totalXpFor, levelFor, LEVEL_MAX, CLAIM_UNLOCK_SECS,
+  totalXpFor, levelFor, LEVEL_MAX, CLAIM_UNLOCK_SECS, CLIENT_BUILD,
 } from './config';
 import {
   firebaseEnabled,
@@ -319,6 +319,7 @@ async function connect() {
             setStatus('SUBSCRIPTION ERROR — SERVER/CLIENT VERSION MISMATCH?');
           })
           .subscribe([
+            'SELECT * FROM build_info',
             'SELECT * FROM lobby',
             'SELECT * FROM match',
             'SELECT * FROM player',
@@ -390,6 +391,28 @@ async function connect() {
     }
   });
 }
+
+// The build stamp readout: client and module builds side by side, bottom
+// right, red on mismatch. Small enough to ignore, present enough to settle
+// every "is this even the new version?" in one glance.
+const buildTag = document.createElement('div');
+buildTag.style.cssText =
+  'position:fixed;right:8px;bottom:6px;z-index:40;font:10px monospace;' +
+  'color:#9aa3b5;opacity:0.8;pointer-events:none;text-shadow:0 1px 2px #000';
+document.body.appendChild(buildTag);
+function refreshBuildTag() {
+  let moduleBuild = '?';
+  try {
+    for (const r of conn.db.buildInfo.iter()) moduleBuild = r.build;
+  } catch {
+    /* not subscribed yet */
+  }
+  const ok = moduleBuild === CLIENT_BUILD;
+  buildTag.textContent = `client ${CLIENT_BUILD} · module ${moduleBuild}`;
+  buildTag.style.color = ok ? '#9aa3b5' : '#ff5d4f';
+  if (!ok) buildTag.style.opacity = '1';
+}
+setInterval(refreshBuildTag, 2000);
 
 // smoothed render positions (movement glides at 60fps between 30Hz ticks)
 const playerStamp = new Map<string, number>();

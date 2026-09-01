@@ -9,7 +9,7 @@ import {
   ROLE_OUTFIELD, ROLE_KEEPER, CTRL_NONE,
   MAX_TEAM_SIZE, OUTFIELD_PER_SIDE, STAMINA_MAX,
   HALF_SECONDS, OT_SECONDS, COUNTDOWN_TICKS,
-  BOT_LEVEL_COUNT, HALF_TICKS,
+  BOT_LEVEL_COUNT, HALF_TICKS, MODULE_BUILD,
   type MetaHooks,
 } from './football';
 
@@ -555,7 +555,15 @@ const ReapTimer = table(
   }
 );
 
+// One public row naming the module build, refreshed on every connection so
+// it is always the RUNNING module's stamp, not a stale publish's.
+const BuildInfo = table(
+  { name: 'build_info', public: true },
+  { id: t.u64().primaryKey(), build: t.string() }
+);
+
 const spacetimedb = schema({
+  buildInfo: BuildInfo,
   lobby: Lobby,
   match: Match,
   player: Player,
@@ -1900,6 +1908,11 @@ function releaseSpectator(ctx: Ctx, p: PlayerRow) {
 // Lifecycle reducers
 // ---------------------------------------------------------------------------
 export const onConnect = spacetimedb.clientConnected(ctx => {
+  const existingBuild = ctx.db.buildInfo.id.find(0n);
+  if (!existingBuild) ctx.db.buildInfo.insert({ id: 0n, build: MODULE_BUILD });
+  else if (existingBuild.build !== MODULE_BUILD) {
+    ctx.db.buildInfo.id.update({ id: 0n, build: MODULE_BUILD });
+  }
   const connId = ctx.connectionId;
   if (connId) {
     ctx.db.session.insert({

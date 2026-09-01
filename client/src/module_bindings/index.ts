@@ -61,6 +61,7 @@ import AccountRow from "./account_table";
 import BallRow from "./ball_table";
 import BetRow from "./bet_table";
 import BookRow from "./book_table";
+import BuildInfoRow from "./build_info_table";
 import ChatRow from "./chat_table";
 import GoalEventRow from "./goal_event_table";
 import LobbyRow from "./lobby_table";
@@ -124,6 +125,17 @@ const tablesSchema = __schema({
       { name: 'book_match_id_key', constraint: 'unique', columns: ['matchId'] },
     ],
   }, BookRow),
+  buildInfo: __table({
+    name: 'build_info',
+    indexes: [
+      { accessor: 'id', name: 'build_info_id_idx_btree', algorithm: 'btree', columns: [
+        'id',
+      ] },
+    ],
+    constraints: [
+      { name: 'build_info_id_key', constraint: 'unique', columns: ['id'] },
+    ],
+  }, BuildInfoRow),
   chat: __table({
     name: 'chat',
     indexes: [

@@ -23,6 +23,11 @@ tournaments, betting, chat, graphics) carried over. Key facts:
   turns a packed defence into a wall that swallows every shot.
 - `client/` — Vite + TS app. `src/render.ts` is the Three.js renderer;
   `src/main.ts` owns connection, input, and UI state.
+- **Bump the BUILD STAMP on every push**: `MODULE_BUILD` in
+  `spacetimedb/src/football.ts` and `CLIENT_BUILD` in `client/src/config.ts`,
+  same string, date-letter style (`2026-09-01-A`). The game shows both in
+  the corner, red on mismatch — it exists because deployments have quietly
+  run stale modules while everyone argued about git.
 - After editing the module: `spacetime publish -y` then regenerate bindings:
   `spacetime generate --lang typescript --out-dir client/src/module_bindings --module-path spacetimedb -y`
 - Pitch geometry constants are duplicated in `spacetimedb/src/index.ts` and
