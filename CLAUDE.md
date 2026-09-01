@@ -5,8 +5,22 @@ Seeded from digital-tennis and then rewritten for the sport: the tennis
 gameplay is gone, the sport-agnostic meta layer (rooms, accounts, reconnect,
 tournaments, betting, chat, graphics) carried over. Key facts:
 
-- `spacetimedb/src/index.ts` — single-file module: schema + reducers + the
-  30 Hz `game_tick` scheduled reducer (server-authoritative physics/scoring).
+- `spacetimedb/src/index.ts` — schema + the META layer (accounts, lobbies,
+  betting, tournaments, chat, reconnect) and thin reducer shells.
+- `spacetimedb/src/football.ts` — THE FOOTBALL, all of it: the 30 Hz tick,
+  physics, possession, the laws, the keeper, both team brains, the action
+  contexts. Rewritten clean in one pass; index.ts calls in through
+  `tickFootball`/`footballAction`/`switchPilot` and a small MetaHooks object,
+  and football.ts takes only `import type` from index.ts — value flow is one
+  direction. Team behaviour is ONE PLAN PER SIDE PER TICK (`teamPlan`): every
+  off-ball job is assigned in one place, then structural rules (second-man,
+  support spacing, separation) are applied over whatever it decided.
+- Two lessons the rewrite itself paid for: never LEAD a pass toward the
+  receiver's own goal (a retreating defender gets it at his FEET — the
+  overshot lead sails past a keeper the back-pass law forbids from catching,
+  straight into his own net), and a ball at shot pace is only BLOCKED by a
+  body genuinely in the way (~1.4 units) — full control radius on hot balls
+  turns a packed defence into a wall that swallows every shot.
 - `client/` — Vite + TS app. `src/render.ts` is the Three.js renderer;
   `src/main.ts` owns connection, input, and UI state.
 - After editing the module: `spacetime publish -y` then regenerate bindings:
