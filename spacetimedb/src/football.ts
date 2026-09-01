@@ -217,7 +217,12 @@ const AI_SEPARATION_R = PITCH_HALF_WID * 0.29;
 const AI_PASS_MAX = 52;
 const PRESS_HYSTERESIS = 1.15; // challenger must be this much better to take the job
 const JOCKEY_RANGE = 7;
-const JOCKEY_OFF = 2.6;
+// OUTSIDE the steal radius (CONTROL_RADIUS 2.8), on purpose: a jockey who
+// parks inside it is rolling the contest dice against the carrier every
+// single tick — a 21%-per-second silent theft that meant nobody ever got a
+// moment on the ball. Containment CONTAINS; taking the ball costs a
+// deliberate poke or a slide, or waits for a heavy touch.
+const JOCKEY_OFF = 4.2;
 const COVER_DEPTH = 14;
 const MARK_GOALSIDE = 3.5;
 const SUPPORT_BEHIND = 14;

@@ -2868,7 +2868,12 @@ function buildScene() {
   scene3.background = makeSkyTexture();
   // Side-on the far stand is only ~130 units off, so the haze has to start
   // inside the pitch to read at all.
-  scene3.fog = new THREE.Fog(0xdce8f2, 90, 260);
+  // Fog tuned for the LONG-LENS camera: the eye now sits 107-160 units from
+  // the aim, so a ramp starting at 90 put the far half of the PITCH inside
+  // the fog — every attack up the far touchline played out in a white wash.
+  // The pitch's farthest corner is ~210 from the rail; fog begins beyond it
+  // and only softens the stands and sky, which is all it was ever for.
+  scene3.fog = new THREE.Fog(0xdce8f2, 240, 520);
 
   // resizeToDisplay corrects this on the first frame; the fallback only
   // covers a canvas that has not been laid out yet.
