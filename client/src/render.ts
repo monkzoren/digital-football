@@ -1884,6 +1884,24 @@ function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
 }
 
+// GOOOAL. Arms thrown up in a V, chest out, bouncing — held for the length
+// of the celebration pause. The little hop is driven by wall-clock sine so
+// every scorer bounces at his own phase (seeded), not in lockstep.
+function celebratePose(now: number, seed: number): Pose {
+  const hop = Math.abs(Math.sin(now / 240 + seed));
+  return {
+    ...ZERO_POSE,
+    leanF: -0.18, // chest out, head back
+    crouch: -0.12 * hop, // negative crouch = up on the toes / airborne
+    twist: Math.sin(now / 480 + seed) * 0.12,
+    thighL: -0.25 * hop, calfL: 0.5 * hop,
+    thighR: -0.2 * hop, calfR: 0.45 * hop,
+    // both arms straight up in the V
+    shLx: -2.6, shLz: 0.5, elL: -0.15,
+    shRx: -2.6, shRz: -0.5, elR: -0.15,
+  };
+}
+
 // Plant-and-turn. A footballer reversing does not rotate on the spot like a
 // turret: he plants the outside foot, drops his hips and pushes off it. This
 // is the pose that plays over the pivot window, blended over the run.
@@ -3746,6 +3764,14 @@ export function drawScene(scene: Scene) {
         target = blendPose(target, pv, w);
         rate = 26;
       }
+    } else if (
+      scene.phase === PHASE_PAUSE &&
+      scene.restartKind === RK_KICKOFF &&
+      scene.strikerRigSlot === slot
+    ) {
+      // the goal pause belongs to the man who scored
+      target = celebratePose(now, rig.runSeed);
+      rate = 14;
     } else {
       target = idlePose(pl, now, rig.runSeed);
     }
@@ -3769,6 +3795,7 @@ export function drawScene(scene: Scene) {
       rig.diveStart = now;
       const dvx = toThree(flip, pl.diveDirX ?? 0, pl.diveDirY ?? 0, 0);
       rig.diveDir = dvx.x >= 0 ? 1 : -1;
+      playWhoosh(0.7); // a body at full stretch moves air
     }
     rig.prevDive = diveT_;
     let diveK = rig.diveStart >= 0 ? (now - rig.diveStart) / KEEPER_DIVE_MS : -1;

@@ -3921,9 +3921,40 @@ function botPlay(
     ty = ball.y + ball.vy * 0.25 + noise(2) * lvl.reactErr;
     const dist = Math.hypot(ball.x - bot.x, ball.y - bot.y);
     const oppOwns = ball.hasOwner && possSide === 1 - bot.side;
+    // JOCKEY. A defender who has ARRIVED does not keep sprinting through the
+    // dribbler — he sets himself goal-side of the ball and shepherds, waiting
+    // for the touch he can take. Charging at full pace forever meant a 1v1
+    // was over the moment the presser got there; standing a couple of units
+    // goal-side instead is what gives the man on the ball a live moment to
+    // beat him — and it is also just what defending looks like.
+    if (oppOwns && dist < JOCKEY_RANGE) {
+      const gy = sideSign(bot.side) * PITCH_HALF_LEN;
+      const dgx = 0 - ball.x;
+      const dgy = gy - ball.y;
+      const dg = Math.hypot(dgx, dgy) || 1;
+      tx = ball.x + (dgx / dg) * JOCKEY_OFF;
+      ty = ball.y + (dgy / dg) * JOCKEY_OFF;
+    }
+    // SLIDE AT THE TOUCH, NOT AT THE MAN. A dribble is a cycle of knocks, and
+    // the moment to tackle is when the ball is away from the carrier's feet —
+    // between touches — because that is when a lunge reaches BALL first and
+    // is a fair tackle. Sliding whenever the carrier was merely close meant
+    // the jockeying presser sat in range rolling the dice every tick, and a
+    // watched second half produced a free kick every twenty seconds, all of
+    // them his. The winnable window is when the carrier's own gap to the
+    // ball is open; inside it the slide is football, outside it is a foul
+    // waiting for a whistle.
+    const carrierRow = oppOwns
+      ? foes.find(f => sameId(f.identity, ball.ownerId))
+      : undefined;
+    const ballLoose =
+      !ball.hasOwner ||
+      (carrierRow !== undefined &&
+        Math.hypot(ball.x - carrierRow.x, ball.y - carrierRow.y) > TOUCH_TRIGGER + 0.6);
     if (
-      oppOwns && dist < 6 && bot.slideTicks === 0 && bot.stamina >= SLIDE_COST &&
-      hash01(seed * 11.7 + match.clockTicks * 0.31) < lvl.tackleChance
+      oppOwns && ballLoose && dist < 6 && bot.slideTicks === 0 &&
+      bot.stamina >= SLIDE_COST &&
+      hash01(seed * 11.7 + match.clockTicks * 0.31) < lvl.tackleChance * 3
     ) {
       const len = dist || 1;
       ctx.db.player.identity.update({
@@ -4187,6 +4218,10 @@ const ATTACK_SPACING = 13;
 // A marker stands this far goal-side of his man: near enough to intercept,
 // far enough that a turn does not beat him.
 const MARK_GOALSIDE = 3.5;
+// Inside this range of an opponent's ball the presser jockeys instead of
+// charging, and how far goal-side of the ball he sets himself.
+const JOCKEY_RANGE = 7;
+const JOCKEY_OFF = 2.6;
 // A short option for a restart: close enough to be a certain pass.
 const OPTION_SHORT = 13;
 // The long option, up the line.

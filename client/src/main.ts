@@ -44,6 +44,7 @@ import {
   playGo,
   playWhistle,
   playDing,
+  playFoulWhistle,
   playEmote,
   playBlip,
   getAudio,
@@ -2161,7 +2162,15 @@ function updatePlates(match: any, players: any[], mySide: number) {
     // kick-off dot carries
     plate.querySelector('.pserve')!.textContent =
       match.phase === PHASE_KICKOFF && match.kickoffSide === side ? '● KICK OFF' : '';
-    plate.querySelector('.ppoints')!.textContent = '';
+    // Discipline on the plate: a caution or a sending-off should stay
+    // visible after the banner fades — a team a man down reads differently.
+    const squad = players.filter(p => p.side === side && !p.spectator);
+    const yellows = squad.reduce(
+      (n, p) => n + (p.sentOff ? 0 : Math.min(1, p.cards ?? 0)), 0
+    );
+    const reds = squad.filter(p => !!p.sentOff).length;
+    plate.querySelector('.ppoints')!.textContent =
+      '\u{1F7E8}'.repeat(Math.min(yellows, 3)) + '\u{1F7E5}'.repeat(reds);
 
     // Stamina under the nameplate.
     const fill = plate.querySelector('.pmeter-fill') as HTMLElement;
@@ -2270,7 +2279,12 @@ function crowdFrame(match: any, ball: any) {
       } else {
         const msg: string = match.pointMsg ?? '';
         if (msg.startsWith('HALF-TIME')) playWhistle();
-        else crowdMurmur(0.4); // a throw-in, a corner, a goal kick
+        else if (msg.startsWith('FREE KICK') || msg.startsWith('PENALTY')) {
+          // a foul gets the referee's sharp blast — the one sound that tells
+          // you a whistle has gone without reading a banner
+          playFoulWhistle();
+          crowdMurmur(0.6); // and the crowd reacts to the decision
+        } else crowdMurmur(0.4); // a throw-in, a corner, a goal kick
       }
     }
     crowdPrevPhase = match.phase;

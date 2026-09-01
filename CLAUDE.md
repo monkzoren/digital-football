@@ -90,8 +90,11 @@ tournaments, betting, chat, graphics) carried over. Key facts:
     gap between `KEEPER_CLEAR_RADIUS` and the corner of the goal.
   - A kickoff nobody takes freezes the match forever, so after
     `KICKOFF_AUTO` a team-mate steps in and takes it.
-  - **Laws.** A slide that reaches a man without having taken the ball is a
-    foul (ball first — a tackle that won it is fair however many it caught):
+  - **Laws.** Bots slide AT THE TOUCH, not at the man: the lunge is only
+    rolled while the carrier's gap to the ball is open (`> TOUCH_TRIGGER`),
+    because a jockeying presser rolling the dice every tick produced a free
+    kick every twenty seconds. A slide that reaches a man without having
+    taken the ball is a foul (ball first — a tackle that won it is fair however many it caught):
     free kick, or a penalty inside the offender's own area, taken with the
     box cleared. A caution is only for fouling a player who ACTUALLY HAD the
     ball; two is a red. A sent-off body must be excluded from every list

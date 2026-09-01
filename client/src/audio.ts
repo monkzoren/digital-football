@@ -516,6 +516,32 @@ export function playWhistle() {
   whistle(0);
 }
 
+/**
+ * The FOUL blast: one short, hard peep, distinct from the long full-time
+ * whistle. The "pea roll" of a real referee's whistle is two closely detuned
+ * tones beating against each other (~45 Hz), which is exactly how it is faked
+ * here — one oscillator at the pitch, one a hair above it.
+ */
+export function playFoulWhistle() {
+  const a = ac();
+  if (!a || a.state !== 'running') return;
+  const t0 = a.currentTime;
+  const g = a.createGain();
+  g.gain.setValueAtTime(0.0001, t0);
+  g.gain.exponentialRampToValueAtTime(0.05, t0 + 0.015);
+  g.gain.setValueAtTime(0.05, t0 + 0.16);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.24);
+  for (const f of [2080, 2126]) {
+    const osc = a.createOscillator();
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(f, t0);
+    osc.connect(g);
+    osc.start();
+    osc.stop(t0 + 0.26);
+  }
+  g.connect(bus(a));
+}
+
 /** Soft UI blip (settings auditions, menu feedback). */
 export function playBlip() {
   noiseBurst(0.04, 0.1, 500);
