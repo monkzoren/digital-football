@@ -90,6 +90,8 @@ export interface Scene {
   // nearest body to the ball is a bad guess — it animates a bystander, or
   // the keeper stood behind the striker.
   strikerRigSlot?: number;
+  /** rig of the body that HAS the ball (dribbler or holding keeper) */
+  carrierRigSlot?: number;
   // RK_* of the restart being set up (0 = none). A corner is framed with the
   // flag and the near post in shot; a goal cut needs RK_KICKOFF to fire.
   restartKind?: number;
@@ -160,6 +162,7 @@ const shockPos = new THREE.Vector3();
 // body this client drives, the ring fading on the one it just left, and a
 // dimmer ring per body another human is driving.
 let focusRing: THREE.Mesh;
+let carrierRing: THREE.Mesh; // slim ring under whoever HAS the ball
 let focusChevron: THREE.Mesh;
 let ghostRing: THREE.Mesh;
 let pilotRings: THREE.Mesh[] = [];
@@ -2970,6 +2973,7 @@ function buildScene() {
     return m;
   };
   focusRing = mkRing(0.8);
+  carrierRing = mkRing(0.55);
   ghostRing = mkRing(0.5);
   pilotRings = Array.from({ length: RIG_COUNT }, () => mkRing(0.28));
   focusChevron = new THREE.Mesh(
@@ -3470,10 +3474,19 @@ function updateControlMarkers(scene: Scene, now: number) {
   focusRing.visible = false;
   focusChevron.visible = false;
   ghostRing.visible = false;
+  carrierRing.visible = false;
   for (const r of pilotRings) r.visible = false;
   // Both slot lists are optional and may arrive empty for a whole match
   // (spectating, a client that never sends them) — absent means no marker,
   // never a marker on slot 0.
+
+  // WHO HAS THE BALL: a slim ring in his own marker colour under the
+  // carrier, so possession is readable at a glance from the gantry — the
+  // ball itself hides behind ankles. Your own ring already says it is you.
+  const carrierRigNow = markerRig(scene.carrierRigSlot);
+  if (carrierRigNow && scene.carrierRigSlot !== scene.focusSlot) {
+    placeRing(carrierRing, carrierRigNow, 0.04, markerColor(carrierRigNow), 0.5, 0.8);
+  }
 
   // other humans' bodies, dim
   let used = 0;
@@ -3668,7 +3681,12 @@ export function drawScene(scene: Scene) {
     // it off which half of the world you stand in — side-on, that is which
     // touchline you are nearer — spins an idle player 180° as he walks
     // across the pitch.)
-    const baseYaw = (attackDir(side, flip) * Math.PI) / 2;
+    // Idle facing is up the pitch — EXCEPT at your own kickoff, where your
+    // team-mates are all behind you and the pass is going backwards. A taker
+    // squared up to the opposition reads as facing the wrong way, and the
+    // yaw toward a ball he is standing on is numerically unstable anyway.
+    const atKickoff = scene.phase === PHASE_KICKOFF && side === scene.kickoffSide;
+    const baseYaw = (attackDir(side, flip) * Math.PI) / 2 + (atKickoff ? Math.PI : 0);
 
     // air-kick: the charge was released with nothing at the player's feet
     if (rig.prevKickTicks > 0 && !pl.kickHeld && rig.kickStart < 0) {
@@ -3701,7 +3719,7 @@ export function drawScene(scene: Scene) {
       // speed the body has to come round with the feet, and that reluctance
       // is what a hard change of direction is supposed to cost.
       yawRate = 16 - 7 * rig.gait;
-    } else if (ballPos3) {
+    } else if (ballPos3 && Math.hypot(ballPos3.x - pos.x, ballPos3.z - pos.z) > 1.5) {
       // standing still: turn to face the play, the way a footballer does
       yawTarget = Math.atan2(ballPos3.x - pos.x, ballPos3.z - pos.z);
       yawRate = 6;

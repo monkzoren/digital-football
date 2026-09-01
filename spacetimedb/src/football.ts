@@ -91,7 +91,13 @@ const GOAL_PAUSE = ticks(7.5);
 const RESTART_PAUSE = ticks(1.4);
 const HALFTIME_PAUSE = ticks(6);
 export const COUNTDOWN_TICKS = ticks(3);
+// A kickoff nobody takes freezes the match forever — but WHO is waiting
+// matters. An abandoned side gets a stand-in after four seconds; a human who
+// is actually connected gets a proper moment to read the pitch, because a
+// game that plays your kickoff for you while you look at the controls feels
+// broken, not helpful.
 const KICKOFF_AUTO = ticks(4);
+const KICKOFF_AUTO_HUMAN = ticks(15);
 // The restart window: only the awarded side may play the ball, and the set
 // piece must be TAKEN inside it — four seconds, the small-sided law.
 const RESTART_GRACE = ticks(4);
@@ -1000,6 +1006,29 @@ function autoSwitch(ctx: Ctx, match: MatchRow, ball: BallRow | null | undefined)
     }
   }
 
+  // CONTROL FOLLOWS YOUR OWN PASS. The moment your kick is in flight, your
+  // stick moves to the man best placed to receive it — the single switch a
+  // player expects most, and the one the distance rule below can never make
+  // (the receiver is usually well inside its range).
+  for (const person of humans) {
+    const fresh = ctx.db.player.identity.find(person.identity);
+    if (!fresh) continue;
+    const cur = controlledBody(ctx, fresh);
+    if (cur.switchLock > 0) continue;
+    if (ball.hasOwner || !sameId(ball.lastTouchId, cur.identity)) continue;
+    if (Math.hypot(ball.vx, ball.vy) < 10) continue; // a tap, not a pass
+    let best: PlayerRow | null = null;
+    let bestT = Infinity;
+    for (const b of switchCandidates(ctx, fresh, cur)) {
+      if (b.role !== ROLE_OUTFIELD) continue;
+      const t = interceptPoint(
+        b.x, b.y, PLAYER_SPEED * charStat(b.characterId).speed * SPRINT_MUL, ball
+      ).t;
+      if (t < bestT) { bestT = t; best = b; }
+    }
+    if (best && bestT < 1.6) bindPilot(ctx, fresh, cur, best, AUTO_LOCK);
+  }
+
   const proposals: { person: PlayerRow; from: PlayerRow; to: PlayerRow; fromDist: number }[] = [];
   for (const person of humans) {
     const fresh = ctx.db.player.identity.find(person.identity);
@@ -1233,22 +1262,37 @@ function teamPlan(
       // deliberate suspension of the second-man rule
       put(m, ball.x, ball.y, true, true);
     } else if (rank <= 1) {
-      // COVER: the line between ball and our goal
+      // COVER: the line between ball and our goal — but BLENDED toward his
+      // formation anchor. A cover point computed purely off the ball follows
+      // every touch of it, and a whole defence tracking the ball is what
+      // reads from the stands as "no formation, everyone chasing". Keeping
+      // a third of the anchor keeps his zone identity while he covers.
       const dgx = 0 - ball.x;
       const dgy = myGoalY - ball.y;
       const dg = Math.hypot(dgx, dgy) || 1;
       const back = Math.min(COVER_DEPTH, dg * 0.5);
-      put(m, ball.x + (dgx / dg) * back, ball.y + (dgy / dg) * back, true);
+      const a = anchorFor(side, m.teamSlot, ball.x, ball.y, false);
+      put(
+        m,
+        (ball.x + (dgx / dg) * back) * 0.65 + a.x * 0.35,
+        (ball.y + (dgy / dg) * back) * 0.65 + a.y * 0.35,
+        true
+      );
     } else {
-      // MARK the most advanced opponent, goal-side of him
+      // MARK the most advanced opponent, goal-side of him — same blend, so
+      // the marker shades his man without abandoning his zone entirely
       let danger: PlayerRow | null = null;
       for (const f of outfielders(all, 1 - side)) {
         if (!danger || (f.y - danger.y) * -up > 0) danger = f;
       }
+      const a = anchorFor(side, m.teamSlot, ball.x, ball.y, false);
       if (danger) {
-        put(m, danger.x * 0.85, danger.y + Math.sign(myGoalY - danger.y || 1) * MARK_GOALSIDE);
+        put(
+          m,
+          danger.x * 0.85 * 0.7 + a.x * 0.3,
+          (danger.y + Math.sign(myGoalY - danger.y || 1) * MARK_GOALSIDE) * 0.7 + a.y * 0.3
+        );
       } else {
-        const a = anchorFor(side, m.teamSlot, ball.x, ball.y, false);
         put(m, a.x, a.y);
       }
     }
@@ -1854,8 +1898,11 @@ export function tickFootball(
       if (!cur || cur.slideTicks > 0) continue;
     } else if (cur.ctrlSeat === CTRL_NONE && match.phase === PHASE_KICKOFF && ball) {
       // kickoff: the taker walks to the ball and plays it; late, a stand-in
+      const humanWaiting = players.some(
+        q => !q.isBot && !q.spectator && q.side === match.kickoffSide && q.online
+      );
       const standIn =
-        match.pauseTicks > KICKOFF_AUTO
+        match.pauseTicks > (humanWaiting ? KICKOFF_AUTO_HUMAN : KICKOFF_AUTO)
           ? outfielders(players, cur.side).find(b => b.ctrlSeat === CTRL_NONE)?.teamSlot
           : undefined;
       const amTaker = cur.teamSlot === 0 || (standIn !== undefined && cur.teamSlot === standIn);

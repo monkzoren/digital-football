@@ -4281,6 +4281,14 @@ function frame() {
     // who struck it, so the renderer animates the boot that actually kicked
     // instead of guessing at the body nearest the ball
     strikerRigSlot: striker ? rigSlotOf(striker) : undefined,
+    // who HAS it — the dribbler, or a keeper with it in his gloves
+    carrierRigSlot: (() => {
+      if (!ball || !ball.hasOwner) return undefined;
+      const owner = players.find(
+        p => p.identity.toHexString() === ball.ownerId.toHexString()
+      );
+      return owner ? rigSlotOf(owner) : undefined;
+    })(),
     // how the camera frames a stoppage — a corner wants the flag and the near
     // post in shot, a kick-off restart is the cue for the goal cut
     restartKind: viewMatch.restartKind ?? RK_NONE,
