@@ -70,7 +70,7 @@ export const ACT_THIRD = 2;
 // differ — because half of this project's history is fixes that were live
 // locally while the deployment quietly ran last week's module, and "are you
 // sure you pushed?" should be answerable by looking at the screen.
-export const MODULE_BUILD = '2026-09-01-A';
+export const MODULE_BUILD = '2026-09-01-B';
 
 export const TICK_HZ = 30;
 export const DT = 1 / TICK_HZ;
