@@ -29,7 +29,7 @@ import type { Ctx, PlayerRow, MatchRow, BallRow, LobbyRow } from './index';
 import { Identity } from 'spacetimedb';
 
 // Bump on EVERY push, in lockstep with CLIENT_BUILD in client/src/config.ts.
-export const MODULE_BUILD = '2026-09-01-C';
+export const MODULE_BUILD = '2026-09-01-D';
 
 // ---- wire enums -------------------------------------------------------------
 export const PHASE_KICKOFF = 1;
@@ -729,9 +729,27 @@ function autoSwitch(ctx: Ctx, match: MatchRow, ball: BallRow | null | undefined)
       if (best && bestT < 1.6) bindPilot(ctx, fresh, cur, best, AUTO_LOCK, 'pass-follow');
       continue;
     }
-    // the ball is theirs or loose and my man is nowhere near it
     const owner = ball.hasOwner ? players.find(p => sameId(p.identity, ball.ownerId)) : undefined;
-    if (owner && owner.side === fresh.side) continue;
+    // THE MAN WITH THE BALL IS YOUR MAN. Whoever on your side has it —
+    // a team-mate who won a tackle, picked up a loose ball, took a throw —
+    // your stick goes to him, always. Arcade football has one rule for who
+    // you control in possession: the carrier. (With more than one human a
+    // side, the carrier goes to whoever is nearest him; a human already on
+    // a body is never displaced by another human.)
+    if (owner && owner.side === fresh.side) {
+      if (sameId(owner.identity, cur.identity)) continue; // already him
+      if (owner.ctrlSeat !== CTRL_NONE) continue; // another human has him
+      if (owner.role !== ROLE_OUTFIELD) continue; // the keeper rule above owns that case
+      const rivals = humans.filter(h => h.side === fresh.side && !sameId(h.identity, fresh.identity));
+      const myD = dist(cur.x, cur.y, owner.x, owner.y);
+      const nearer = rivals.some(h => {
+        const hb = controlledBody(ctx, h);
+        return hb.switchLock === 0 && dist(hb.x, hb.y, owner.x, owner.y) < myD;
+      });
+      if (!nearer) bindPilot(ctx, fresh, cur, owner, AUTO_LOCK);
+      continue;
+    }
+    // the ball is theirs or loose and my man is nowhere near it
     const leadX = ball.x + ball.vx * 0.2, leadY = ball.y + ball.vy * 0.2;
     const curD = dist(cur.x, cur.y, leadX, leadY);
     if (match.clockTicks % 15 === 0)    if (curD < AUTO_SWITCH_RANGE + AUTO_SWITCH_MARGIN) continue;
