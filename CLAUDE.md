@@ -34,107 +34,57 @@ tournaments, betting, chat, graphics) carried over. Key facts:
   `client/src/config.ts` — keep in sync. Same for the match format
   (HALF_SECONDS / OT_SECONDS), the phase and restart-kind enums, and the
   progression curve.
-- **The football, specifically:**
-  - It is 5-a-side: every side fields `OUTFIELD_PER_SIDE` (4) outfielders in a
-    1-2-1 diamond plus a keeper. Human seats take teamSlot 0..teamSize-1 and
-    bot FILLERS take the rest. `lobby.teamSize` is HUMAN seats (1-3), not
-    players on the pitch — a 1v1 room is still ten bodies.
-  - Keepers and fillers are `matchBot: true`: spawned in `goLive`, deleted in
-    `endMatchCleanup`. That predicate must key on `matchBot`, NOT `isBot` —
-    `create_practice` seats a LOBBY bot as p1Id and `rematch` reuses it.
-  - **Control is a token on the BODY, not on the person.** `player.ctrlSeat`
-    holds the teamSlot of the human driving that body (255 = AI), so "two
-    humans driving one footballer" is unrepresentable rather than merely
-    forbidden. `getPlayer` returns the PERSON; `controlledBody` returns the
-    body their stick moves. The four input reducers go through the latter,
-    and the tick's AI gate asks `ctrlSeat === CTRL_NONE`, never `isBot`.
-    `bindPilot` is the only writer of the token.
-  - `isBot` now means only "this row is not a person". Anything counting
-    HUMAN SEATS (isRanked, sideMmr, teamName) must say so explicitly, or a
-    pitch full of fillers silently makes every match unranked.
-  - Bots steer on `mvX/mvY` FLOATS; `dirX/dirY` stay as the rendered facing.
-    Signing a heading into the i8 stick is what made them zig-zag.
-  - Movement is INSTANT — the stick IS the velocity. Do not add acceleration
-    to make it look smoother: that reads as input lag, and smoothness is the
-    renderer's job (animation blending, not physics).
-  - Anything that asks "which body carries my seat" must consider EVERY body,
-    keeper included. Filtering that lookup to outfielders made the token
-    invisible once control reached the keeper, so the tick's self-heal
-    stamped a SECOND claimant onto the player's old body.
-  - Input is three context-sensitive buttons through one `action({button})`
-    reducer, resolved server-side: on the ball pass/lob/shoot, chasing
-    tackle/slide/switch, keeper throw/long ball/put-ball-down, plus the
-    set-piece variants. Every action is a single press — nothing is charged
-    or timed. Passing is ASSISTED: the stick picks a direction and
-    `pickPassTarget` finds the man, because aiming a pass at raw eight-way
-    degrees is what made passing feel awful.
-  - The client mirrors PLAYER_SPEED and SPRINT_MUL in `client/src/config.ts`
-    and dead-reckons with them. They have drifted out of sync three times,
-    and every time the symptom was "the game feels jittery" — check them
-    whenever a speed changes, and never declare a second copy anywhere else
-    (SPRINT_MUL drifted precisely because it lived in `main.ts`, where the
-    config.ts warning was not looking).
-  - The render smoother in `renderPosition` exists to hide the 30 Hz step in
-    OTHER people's rows. On the body your own stick drives it is pure added
-    latency — that is why it runs at rate 34 there and 11 elsewhere. Raising
-    the shared rate to "smooth things out" makes the controls feel floaty.
-  - Exactly one player per side may approach the ball: the elected presser
-    (`match.presser0/1`, with hysteresis). Everyone else is pushed out of
-    `AI_PRESS_BUBBLE`. That rule is what prevents the under-8s huddle.
-  - Possession is a TOUCH CYCLE, not a magnet. The owner knocks the ball
-    ahead only when he has caught up to it (`gap < TOUCH_TRIGGER`); between
-    touches nothing writes the ball's position — it rolls under the
-    integrator and is genuinely loose, which is what lets a defender reach
-    it and what makes a heavy touch run out of play. Do NOT go back to
-    pinning it to an offset: that kills the risk, and a velocity-less ball
-    cannot be interpolated by the client either, so it strobes.
-    `CONTROL_KEEP_RADIUS` must stay comfortably beyond the knock distance —
-    chasing your own touch IS dribbling. Ball deceleration is
-    quadratic AIR DRAG (`BALL_DRAG`) plus constant rolling resistance —
-    rolling resistance alone is right for a slow ball and sends a struck one
-    750 units down a 132-unit pitch. A struck ball sets
-    `ball.lockTicks`, which locks out `ball.lastTouchId` — WITHOUT that the
-    kicker's own control radius swallows the shot on the next tick and
-    nothing ever leaves a boot. Any other player's touch clears the lock.
-  - Out-of-play is judged AFTER possession, on where the ball IS
-    (`resolveOutOfPlay`), not only on the tick it crosses a line — otherwise
-    a dribbler simply walks it out of the world.
-  - A forward kick inside `SHOOT_RANGE` is re-aimed at the goal mouth
-    (`executeKick`'s `shootAssist`). Without it, eight-way aim cannot hit a
-    fourteen-foot goal from an angle and the game is unplayable.
-  - The keeper commits to a save only inside its level's `react` window and
-    with an `err` offset. A ball in free flight crosses the line at
-    `x + vx*t` no matter when you compute it, so the keeper's prediction is
-    EXACT and `err` is the only thing making it beatable — it must exceed the
-    gap between `KEEPER_CLEAR_RADIUS` and the corner of the goal.
-  - A kickoff nobody takes freezes the match forever, so after
-    `KICKOFF_AUTO` a team-mate steps in and takes it.
-  - **Laws.** Bots slide AT THE TOUCH, not at the man: the lunge is only
-    rolled while the carrier's gap to the ball is open (`> TOUCH_TRIGGER`),
-    because a jockeying presser rolling the dice every tick produced a free
-    kick every twenty seconds. A slide that reaches a man without having
-    taken the ball is a foul (ball first — a tackle that won it is fair however many it caught):
-    free kick, or a penalty inside the offender's own area, taken with the
-    box cleared. A caution is only for fouling a player who ACTUALLY HAD the
-    ball; two is a red. A sent-off body must be excluded from every list
-    that says who is on the pitch — AI shape, press election, possession
-    `eligible`, pass targets, switch candidates, restart taker — and
-    `controlledBody` must hand the seat a different body, or the stick
-    drives a man on the touchline for the rest of the match.
-  - **The back-pass law** rides on `ball.fromKick`: set in `executeKick`
-    (outfielders only) and explicitly cleared at EVERY other touch, because a
-    `{...ball}` spread would otherwise carry it forward forever. The keeper's
-    catch is gated on it. He can still play it with his feet — that is the
-    point of the law.
-  - **Locomotion is a blend tree, not one animation.** `runPose` blends jog →
-    sprint on MEASURED ground speed, and the stride CADENCE is derived from
-    the stride LENGTH (`strideRateFor`) — fix the cadence instead and the
-    feet skate. `moving` means covering ground, not holding the stick.
-  - **The camera is a long lens from well back** (19° FOV, boom ≥ 1.63 ×
-    PITCH_HALF_LEN). A close wide camera cannot aim at the far side without
-    the gantry standing on the pitch, so the aim gets pinned to its own
-    touchline and every body piles into the top of the frame. Boom limits are
-    set from what a player must SEE, not from how the rig looks.
+- **The football, specifically — it is an ARCADE game, by design:**
+  - `spacetimedb/src/football.ts` is written to the traditional arcade
+    soccer formula (Sensible Soccer, ISS, Super Sidekicks), NOT a simulation.
+    Three rewrites paid for this distinction: simulation dribbling, exact
+    keeper prediction and tactical cover/mark all read as "can't keep the
+    ball", "no formation", "feels like crap". Do not drift back.
+  - It is 4v4: three outfielders in a triangle (ST/LW/RW) plus a keeper.
+    `lobby.teamSize` is HUMAN seats (1-3); bot fillers take the rest.
+    Keepers and fillers are `matchBot: true` (never key on `isBot`).
+  - **The ball is GLUED to the carrier's feet.** It does not roll free between
+    touches. Only a TACKLE takes it (an opponent's deliberate act, which can
+    miss and stun him), a slide, or the carrier kicking it. A pass arrives at
+    a team-mate's feet and becomes his. Shots are fast and aim-assisted at a
+    corner; the keeper covers the middle by reflex and DIVES for corners with
+    a per-level success rate — those two numbers are the scoring dials.
+  - **Control is a token on the BODY** (`player.ctrlSeat`, 255 = AI);
+    `bindPilot` is the only writer; `controlledBody` considers EVERY body,
+    keeper included. Control FOLLOWS YOUR OWN PASS to the receiver, goes to
+    your keeper when he catches, and comes back out the moment he releases.
+  - Bots steer on `mvX/mvY` FLOATS; `dirX/dirY` is the rendered facing. A
+    bot that only writes dir stands still forever (the kickoff freeze).
+    Movement is INSTANT — the stick is the velocity; smoothness is the
+    renderer's job. PLAYER_SPEED / SPRINT_MUL / CHAR_STATS.speed are mirrored
+    in `client/src/config.ts` — drift there reads as jitter.
+  - Bots SETTLE a ball for `BOT_SETTLE` before deciding (else every
+    possession is a one-touch ping and the ball never stops), never chase
+    their own pass, and must be in tackle range for `TACKLE_ARM` before a
+    tackle may come — stepping out of range resets it. That wind-up is what
+    makes a dodge a dodge.
+  - The team is a FORMATION BLOCK that slides with the ball (`blockSpot`):
+    one presser, the rest keep shape; in possession the two off the ball run
+    their lanes ahead of the carrier. `teamPlan` assigns every job in one
+    place; `applyShapeRules` (separation, second-man bubble) sits over it.
+  - A ball waiting to be restarted is DEAD until taken; the taker is placed
+    on it (just INSIDE the line for throw-ins/corners, or his first touch
+    knocks it straight back out). A connected human gets 15 s to take a
+    kickoff; an absent side gets a stand-in after 4 s. The kickoff is a soft
+    ball to the nearest team-mate.
+  - The keeper never grabs his own side's outgoing kick, never comes for a
+    placed restart, and only steps out to a loose ball he is nearest to.
+  - Rules are light: throw-ins, corners, goal kicks, a rare foul (a slide
+    reaching the man well short of the ball), cards for fouling the carrier.
+    No offside, no back-pass law.
+  - The camera is a long lens from well back (19° FOV); the fog starts beyond
+    the far corner of the pitch (240) or the far half plays in white haze.
+  - Verify by PLAYING: the scratchpad harnesses drive a real browser —
+    `recv` (receive then run, prints a possession trace), `setp` (force a
+    dead ball, take it), `minute` (nine frames of the opening minute to
+    critique), `full` (a whole match: goals, half-time, full time). Every
+    fix this project has kept came from one of those; every fix it lost
+    came from reasoning alone.
 - Betting lives in the same two files: the `wallet`/`bet`/`book` tables +
   `place_bet` in the module, the BETS panel and pitchside bar in
   `client/src/main.ts`. Odds are server-authoritative — the client only

@@ -33,7 +33,7 @@ export const TICK_HZ = 30;
 // playing" is answered by looking at the screen instead of arguing about
 // git. A mismatch means the deployment updated one half and not the other —
 // almost always a module-publisher that failed or never re-ran.
-export const CLIENT_BUILD = '2026-09-01-B';
+export const CLIENT_BUILD = '2026-09-01-C';
 
 // Pitch geometry — must mirror spacetimedb/src/index.ts.
 export const PITCH_HALF_LEN = 66;

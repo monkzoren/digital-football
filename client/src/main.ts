@@ -4158,6 +4158,19 @@ function frame() {
     const owner = ownerHex
       ? players.find(p => p.identity.toHexString() === ownerHex)
       : undefined;
+    // ARCADE GLUE: an owned ball is welded to its owner's feet server-side,
+    // so it is drawn from the owner's dead-reckoned render position plus the
+    // same offset — it moves exactly with the body your stick is driving,
+    // with none of the 30 Hz snapshot lag a separately-smoothed ball has.
+    if (owner && (owner.role ?? 0) !== ROLE_KEEPER) {
+      const op = renderPosition(owner, now, frameDt);
+      const mlen = Math.hypot(owner.mvX ?? 0, owner.mvY ?? 0);
+      const fx = mlen > 0.01 ? (owner.mvX ?? 0) / mlen : 0;
+      const fy = mlen > 0.01 ? (owner.mvY ?? 0) / mlen : (owner.side === 0 ? 1 : -1);
+      x = op.x + fx * 1.7;
+      y = op.y + fy * 1.7;
+      z = 0;
+    }
     const bsm = smoothBall ?? { x, y, z };
     // a loose ball is already smooth (real velocity integration), so this only
     // has to take the stutter off a dribble — hence the fast gain
