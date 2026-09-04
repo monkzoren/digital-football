@@ -173,7 +173,9 @@ offers MAX / 120 / 60 / 30.
 - `client/src/config.ts` reads `VITE_SPACETIMEDB_URI` and
   `VITE_DATABASE_NAME` (defaults: `ws://localhost:3000`, `digital-football`).
 - **Accounts are optional.** Set `FIREBASE_*` in `.env` (see `.env.example`)
-  and `FIREBASE_PROJECT` in `spacetimedb/src/index.ts` to the same project id.
+  to the Firebase project SHARED by every Digital game (`FIREBASE_PROJECT` in
+  `spacetimedb/src/index.ts` names it: `digital-tennis`) — one project means
+  one identity per player everywhere, which the championship hub relies on.
   SpacetimeDB validates Firebase ID tokens with no server configuration at
   all: it derives the identity from the token's `iss`+`sub` and fetches the
   signing keys from the issuer's `/.well-known/openid-configuration`, which

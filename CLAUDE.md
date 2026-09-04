@@ -874,3 +874,13 @@ spacetime logs <module-name>
 10. **Views should use index lookups** — `.iter()` causes severe performance issues
 11. **Procedures need `ctx.withTx()`** — `ctx.db` doesn't exist in procedures
 12. **Sum type values** — use `{ tag: 'variant', value: payload }` not `{ variant: payload }`
+- Championship hook (digital-championship): `lobby.championshipLeg` (appended
+  u64 hub leg id, 0 = ordinary room) marks a room the hub's relay opened via
+  `create_championship_room` (gated on `RELAY_ISSUER`, a server-key-minted
+  token; the hub and every sibling game carry the same issuer string). Two
+  entrants = quick match, more = knockout; the championship host is the room
+  host. The result is written ONCE to the public `leg_result` table
+  (`recordLegResult`: quick match from `finishMatch`, knockout from
+  `crownChampion` via `tournamentPlacings`, keepers and fillers excluded);
+  the relay carries it to the hub, which scores it. `FIREBASE_PROJECT` is
+  the SHARED project (`digital-tennis`) so identities match across games.

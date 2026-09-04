@@ -125,6 +125,15 @@ export const GraceTimer = __t.object("GraceTimer", {
 });
 export type GraceTimer = __Infer<typeof GraceTimer>;
 
+export const LegResult = __t.object("LegResult", {
+  id: __t.u64(),
+  legId: __t.u64(),
+  placings: __t.array(__t.identity()),
+  names: __t.array(__t.string()),
+  finishedAt: __t.timestamp(),
+});
+export type LegResult = __Infer<typeof LegResult>;
+
 export const Lobby = __t.object("Lobby", {
   id: __t.u64(),
   code: __t.string(),
@@ -146,6 +155,7 @@ export const Lobby = __t.object("Lobby", {
   teamSize: __t.u8(),
   betWinnerName: __t.string(),
   betWinnerCredits: __t.u32(),
+  championshipLeg: __t.u64(),
 });
 export type Lobby = __Infer<typeof Lobby>;
 

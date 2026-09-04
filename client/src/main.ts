@@ -3762,11 +3762,19 @@ function updateWaitingOverlay(room: any, me: any) {
   const isHost = me && room.hostId.toHexString() === me.identity.toHexString();
 
   const watching = !!me?.spectator;
-  $('waiting-title').textContent = isTournament
-    ? 'TOURNAMENT'
-    : watching
-      ? 'SPECTATING'
-      : 'LOBBY';
+  // A championship leg: the room was opened by the hub, and its result goes
+  // to the championship standings rather than staying in this room.
+  const isLeg = (room.championshipLeg ?? 0n) !== 0n;
+  $('waiting-title').textContent = isLeg
+    ? 'CHAMPIONSHIP LEG'
+    : isTournament
+      ? 'TOURNAMENT'
+      : watching
+        ? 'SPECTATING'
+        : 'LOBBY';
+  $('waiting-sub').textContent = isLeg
+    ? 'THIS ROOM IS A LEG OF A CHAMPIONSHIP — THE RESULT GOES TO ITS STANDINGS'
+    : 'SHARE THIS CODE OR LINK WITH A FRIEND';
   $('lobby-code').textContent = room.code;
   $('lobby-link').textContent = `${location.origin}${location.pathname}?lobby=${room.code}`;
   // mid-tournament the bracket takes center stage; the share code has done its job
