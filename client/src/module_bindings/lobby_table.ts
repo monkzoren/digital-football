@@ -31,4 +31,5 @@ export default __t.row({
   teamSize: __t.u8().name("team_size"),
   betWinnerName: __t.string().name("bet_winner_name"),
   betWinnerCredits: __t.u32().name("bet_winner_credits"),
+  championshipLeg: __t.u64().name("championship_leg"),
 });

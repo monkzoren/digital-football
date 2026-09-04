@@ -8,6 +8,7 @@ import { type Infer as __Infer } from "spacetimedb";
 // Import all reducer arg schemas
 import ActionReducer from "../action_reducer";
 import ClaimWinReducer from "../claim_win_reducer";
+import CreateChampionshipRoomReducer from "../create_championship_room_reducer";
 import CreateLobbyReducer from "../create_lobby_reducer";
 import CreatePracticeReducer from "../create_practice_reducer";
 import CreateTournamentReducer from "../create_tournament_reducer";
@@ -28,6 +29,7 @@ import SwitchPlayerReducer from "../switch_player_reducer";
 
 export type ActionParams = __Infer<typeof ActionReducer>;
 export type ClaimWinParams = __Infer<typeof ClaimWinReducer>;
+export type CreateChampionshipRoomParams = __Infer<typeof CreateChampionshipRoomReducer>;
 export type CreateLobbyParams = __Infer<typeof CreateLobbyReducer>;
 export type CreatePracticeParams = __Infer<typeof CreatePracticeReducer>;
 export type CreateTournamentParams = __Infer<typeof CreateTournamentReducer>;

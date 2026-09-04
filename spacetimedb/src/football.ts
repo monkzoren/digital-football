@@ -29,7 +29,7 @@ import type { Ctx, PlayerRow, MatchRow, BallRow, LobbyRow } from './index';
 import { Identity } from 'spacetimedb';
 
 // Bump on EVERY push, in lockstep with CLIENT_BUILD in client/src/config.ts.
-export const MODULE_BUILD = '2026-09-01-D';
+export const MODULE_BUILD = '2026-09-04-A';
 
 // ---- wire enums -------------------------------------------------------------
 export const PHASE_KICKOFF = 1;

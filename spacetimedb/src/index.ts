@@ -106,8 +106,19 @@ const B_LOST = 2;
 // ---------------------------------------------------------------------------
 // Accounts
 // ---------------------------------------------------------------------------
-const FIREBASE_PROJECT = 'digital-football';
+// ONE Firebase project is shared by every Digital game and the championship
+// hub (digital-championship): SpacetimeDB derives an identity from the
+// token's iss+sub, so the same signed-in player is the same identity in
+// every database — which is what lets a championship match a room's result
+// to its entrants. Hence the tennis project id here, not a football one.
+const FIREBASE_PROJECT = 'digital-tennis';
 const FIREBASE_ISSUER = `https://securetoken.google.com/${FIREBASE_PROJECT}`;
+
+// The championship relay (digital-championship/relay) mints a token signed
+// with THIS server's key carrying this issuer. It may open a room for a
+// championship leg and nothing else; the room reports its result through
+// `leg_result`. Mirrored in the hub and every sibling game — change everywhere.
+const RELAY_ISSUER = 'digital-championship-relay';
 
 const PROV_NONE = 0;
 const PROV_ANON = 1;
@@ -173,6 +184,28 @@ const Lobby = table(
     teamSize: t.u8().default(1), // human seats per side
     betWinnerName: t.string().default(''),
     betWinnerCredits: t.u32().default(0),
+    // NOTE: appended column — the championship leg this room plays (a hub
+    // `leg` id; 0 = an ordinary room). Set only by create_championship_room.
+    championshipLeg: t.u64().default(0n),
+  }
+);
+
+// The finishing order of a championship room, written exactly once when its
+// result is final. The relay reads it into the hub, which does the scoring
+// (and drops bots and non-entrants), so this is everyone who competed,
+// first place first.
+const LegResult = table(
+  {
+    name: 'leg_result',
+    public: true,
+    indexes: [{ accessor: 'byLeg', algorithm: 'btree', columns: ['legId'] }],
+  },
+  {
+    id: t.u64().primaryKey().autoInc(),
+    legId: t.u64(),
+    placings: t.array(t.identity()),
+    names: t.array(t.string()),
+    finishedAt: t.timestamp(),
   }
 );
 
@@ -581,6 +614,7 @@ const spacetimedb = schema({
   session: Session,
   graceTimer: GraceTimer,
   reapTimer: ReapTimer,
+  legResult: LegResult,
 });
 export default spacetimedb;
 
@@ -1192,7 +1226,68 @@ function finishMatch(
     settleBets(ctx, done, winnerSide);
     eliminateLoser(ctx, lobby, done);
     advanceTournament(ctx, lobby);
+  } else if (lobby.championshipLeg !== 0n) {
+    // a two-entrant championship leg is one match: winners first, then losers
+    const order = [...seats].sort((a, b) => Number(b.side === winnerSide) - Number(a.side === winnerSide));
+    recordLegResult(ctx, lobby, order.filter(p => !p.isBot && !p.matchBot).map(p => p.identity));
   }
+}
+
+// ---------------------------------------------------------------------------
+// Championship legs. The hub (digital-championship) asks the relay to open a
+// room here; the room is ordinary in every way except that its result is
+// written to `leg_result` for the relay to carry back.
+// ---------------------------------------------------------------------------
+function requireRelay(ctx: Ctx) {
+  if (ctx.senderAuth.jwt?.issuer !== RELAY_ISSUER) throw new SenderError('Not authorized');
+}
+
+function recordLegResult(ctx: Ctx, lobby: LobbyRow, placings: Identity[]) {
+  if (lobby.championshipLeg === 0n) return;
+  for (const r of ctx.db.legResult.byLeg.filter(lobby.championshipLeg)) if (r) return; // a rematch never rescores
+  ctx.db.legResult.insert({
+    id: 0n,
+    legId: lobby.championshipLeg,
+    placings,
+    names: placings.map(id => ctx.db.player.identity.find(id)?.name ?? ''),
+    finishedAt: ctx.timestamp,
+  });
+}
+
+/** A knockout's finishing order: the champion, then everyone else by the
+ *  round they reached. Team play lists every member of a unit in a row. */
+function tournamentPlacings(ctx: Ctx, lobby: LobbyRow, champId: Identity): Identity[] {
+  const reached = new Map<string, number>();
+  for (const m of lobbyMatches(ctx, lobby.id)) {
+    if (m.bracket === BR_LOSERS) continue;
+    for (const id of [m.p0Id, m.p1Id]) {
+      const key = id.toHexString();
+      reached.set(key, Math.max(reached.get(key) ?? 0, m.round));
+    }
+  }
+  const humans = lobbyPlayers(ctx, lobby.id).filter(p => !p.isBot && !p.matchBot && !p.spectator);
+  const seen = new Set<string>();
+  const units: { captain: Identity; members: Identity[]; round: number }[] = [];
+  for (const p of humans) {
+    let captain = p.identity;
+    for (const row of ctx.db.team.byLobby.filter(lobby.id)) {
+      if (sameId(row.memberId, p.identity)) { captain = row.captainId; break; }
+    }
+    const key = captain.toHexString();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const rows = teamRowsOf(ctx, lobby.id, captain);
+    units.push({ captain, members: rows.length ? rows.map(r => r.memberId) : [captain], round: reached.get(key) ?? 0 });
+  }
+  units.sort((a, b) => {
+    const ac = sameId(a.captain, champId) ? 1 : 0;
+    const bc = sameId(b.captain, champId) ? 1 : 0;
+    return bc - ac || b.round - a.round;
+  });
+  return units.flatMap(u => u.members).filter(id => {
+    const p = ctx.db.player.identity.find(id);
+    return !!p && !p.isBot && !p.matchBot;
+  });
 }
 
 function eliminateLoser(ctx: Ctx, lobby: LobbyRow, done: MatchRow) {
@@ -1584,6 +1679,9 @@ function crownChampion(ctx: Ctx, lobby: LobbyRow, champId: Identity) {
     betWinnerName: bettor?.name ?? '',
     betWinnerCredits: bettor?.credits ?? 0,
   });
+  if (lobby.championshipLeg !== 0n) {
+    recordLegResult(ctx, lobby, tournamentPlacings(ctx, lobby, champId));
+  }
 }
 
 function unitIsAllBots(ctx: Ctx, lobbyId: bigint, captainId: Identity): boolean {
@@ -1773,6 +1871,7 @@ function insertLobby(
     frictionMul: p.frictionMul,
     powerMul: p.powerMul,
     bounceMul: p.bounceMul,
+    championshipLeg: 0n,
   });
 }
 
@@ -2076,6 +2175,36 @@ export const create_tournament = spacetimedb.reducer(
     });
     const fresh = ctx.db.player.identity.find(ctx.sender)!;
     ctx.db.player.identity.update({ ...fresh, lobbyId: lobby.id });
+  }
+);
+
+/**
+ * Open a room for a championship leg. Relay only. The hub picked the code
+ * (six letters, so it can never clash with a five-letter one of ours) and
+ * the championship host becomes the room host — the same identity here as
+ * on the hub, because every game shares one Firebase project. Two entrants
+ * get a quick match; more get a single-elimination knockout the host starts
+ * as usual. `venue` is "pitch:N".
+ */
+export const create_championship_room = spacetimedb.reducer(
+  { legId: t.u64(), code: t.string(), venue: t.string(), hostId: t.identity(), players: t.u8() },
+  (ctx, { legId, code, venue, hostId, players }) => {
+    requireRelay(ctx);
+    if (legId === 0n) throw new SenderError('Bad leg id');
+    for (const l of ctx.db.lobby.iter()) {
+      if (l.championshipLeg === legId) return; // already open — an earlier ack was lost
+    }
+    const clean = code.trim().toUpperCase();
+    if (!/^[A-Z0-9]{4,8}$/.test(clean)) throw new SenderError('Bad room code');
+    if (ctx.db.lobby.code.find(clean)) throw new SenderError('Room code already in use');
+    const m = /^pitch:(\d)$/.exec(venue.trim());
+    const pitch = m ? Number(m[1]) : 0;
+    if (pitch >= PITCHES.length) throw new SenderError(`No such pitch: ${venue}`);
+    const mode = players > 2 ? MODE_TOURNAMENT : MODE_QUICK;
+    const lobby = insertLobby(ctx, mode, false, pitch, 1, 1, {
+      gravityMul: 1, frictionMul: 1, powerMul: 1, bounceMul: 1,
+    }, false, 1);
+    ctx.db.lobby.id.update({ ...lobby, code: clean, hostId, championshipLeg: legId });
   }
 );
 
