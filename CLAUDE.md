@@ -877,9 +877,14 @@ spacetime logs <module-name>
 - Championship hook (digital-championship): `lobby.championshipLeg` (appended
   u64 hub leg id, 0 = ordinary room) marks a room the hub's relay opened via
   `create_championship_room` (gated on `RELAY_ISSUER`, a server-key-minted
-  token; the hub and every sibling game carry the same issuer string). Two
-  entrants = quick match, more = knockout; the championship host is the room
-  host. The result is written ONCE to the public `leg_result` table
+  token; the hub and every sibling game carry the same issuer string). One
+  entrant = a solo match vs the bot (`vsBot` room; `join_lobby` starts it
+  the moment the host walks in, like `create_practice`), two = quick
+  match, more = knockout; the championship host is the room host. The
+  reducer's `settings` arg is the director's JSON — the custom-rules
+  multipliers (`gravityMul`/`frictionMul`/`powerMul`/`bounceMul`, 1 =
+  standard) and `botLevel` — parsed by `legOptions`/`legNum` with the room
+  defaults for anything missing. The result is written ONCE to the public `leg_result` table
   (`recordLegResult`: quick match from `finishMatch`, knockout from
   `crownChampion` via `tournamentPlacings`, keepers and fillers excluded);
   the relay carries it to the hub, which scores it. `FIREBASE_PROJECT` is

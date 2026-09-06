@@ -2178,17 +2178,41 @@ export const create_tournament = spacetimedb.reducer(
   }
 );
 
+
+// The director's game-native rules for a championship leg arrive as JSON
+// (see the hub's client/src/games.ts for the shape). Anything missing or
+// malformed falls back to the room default — a leg always opens.
+function legOptions(settings: string): Record<string, unknown> {
+  try {
+    const v = JSON.parse(settings || '{}');
+    return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+function legNum(o: Record<string, unknown>, key: string, def: number, lo: number, hi: number): number {
+  const v = o[key];
+  return typeof v === 'number' && Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : def;
+}
+function legBool(o: Record<string, unknown>, key: string, def: boolean): boolean {
+  const v = o[key];
+  return typeof v === 'boolean' ? v : def;
+}
+
 /**
  * Open a room for a championship leg. Relay only. The hub picked the code
  * (six letters, so it can never clash with a five-letter one of ours) and
  * the championship host becomes the room host — the same identity here as
- * on the hub, because every game shares one Firebase project. Two entrants
- * get a quick match; more get a single-elimination knockout the host starts
- * as usual. `venue` is "pitch:N".
+ * on the hub, because every game shares one Firebase project. One entrant
+ * gets a solo match against the bot (it starts the moment they walk in —
+ * see join_lobby); two get a quick match; more get a single-elimination
+ * knockout the host starts as usual. `venue` is "pitch:N"; `settings` is
+ * the director's JSON: { gravityMul, frictionMul, powerMul, bounceMul }
+ * (the custom-rules multipliers, 1 = standard) and botLevel (0..2).
  */
 export const create_championship_room = spacetimedb.reducer(
-  { legId: t.u64(), code: t.string(), venue: t.string(), hostId: t.identity(), players: t.u8() },
-  (ctx, { legId, code, venue, hostId, players }) => {
+  { legId: t.u64(), code: t.string(), venue: t.string(), hostId: t.identity(), players: t.u8(), settings: t.string() },
+  (ctx, { legId, code, venue, hostId, players, settings }) => {
     requireRelay(ctx);
     if (legId === 0n) throw new SenderError('Bad leg id');
     for (const l of ctx.db.lobby.iter()) {
@@ -2200,10 +2224,17 @@ export const create_championship_room = spacetimedb.reducer(
     const m = /^pitch:(\d)$/.exec(venue.trim());
     const pitch = m ? Number(m[1]) : 0;
     if (pitch >= PITCHES.length) throw new SenderError(`No such pitch: ${venue}`);
+    const o = legOptions(settings);
+    const phys: PhysArgs = {
+      gravityMul: legNum(o, 'gravityMul', 1, PHYS_GRAVITY_RANGE[0], PHYS_GRAVITY_RANGE[1]),
+      frictionMul: legNum(o, 'frictionMul', 1, PHYS_FRICTION_RANGE[0], PHYS_FRICTION_RANGE[1]),
+      powerMul: legNum(o, 'powerMul', 1, PHYS_POWER_RANGE[0], PHYS_POWER_RANGE[1]),
+      bounceMul: legNum(o, 'bounceMul', 1, PHYS_BOUNCE_RANGE[0], PHYS_BOUNCE_RANGE[1]),
+    };
+    const solo = players <= 1;
+    const botLevel = Math.round(legNum(o, 'botLevel', 1, 0, 2));
     const mode = players > 2 ? MODE_TOURNAMENT : MODE_QUICK;
-    const lobby = insertLobby(ctx, mode, false, pitch, 1, 1, {
-      gravityMul: 1, frictionMul: 1, powerMul: 1, bounceMul: 1,
-    }, false, 1);
+    const lobby = insertLobby(ctx, mode, solo, pitch, 1, botLevel, phys, false, 1);
     ctx.db.lobby.id.update({ ...lobby, code: clean, hostId, championshipLeg: legId });
   }
 );
@@ -2264,6 +2295,15 @@ export const join_lobby = spacetimedb.reducer({ code: t.string() }, (ctx, { code
       x: kickoffSpot(side, posOf(teamSlot), side).x,
       y: kickoffSpot(side, posOf(teamSlot), side).y,
     });
+    // A solo championship leg is a practice match wearing a room code: the
+    // bot takes the far side and play starts the moment the host walks in.
+    if (lobby.vsBot && lobby.championshipLeg !== 0n && sameId(lobby.hostId, ctx.sender)) {
+      const botId = insertBot(ctx, lobby.id, 0, 1);
+      ctx.db.lobby.id.update({ ...lobby, status: L_RUNNING });
+      const match = createMatch(ctx, lobby, 1, 0, ctx.sender, botId);
+      goLive(ctx, match);
+      return;
+    }
     if (competitors.length + 1 < capacity) return;
     ctx.db.lobby.id.update({ ...lobby, status: L_RUNNING });
     const all = lobbyCompetitors(ctx, lobby.id);
