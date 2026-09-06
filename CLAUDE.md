@@ -883,7 +883,7 @@ spacetime logs <module-name>
   match, more = knockout; the championship host is the room host. The
   reducer's `settings` arg is the director's JSON — the custom-rules
   multipliers (`gravityMul`/`frictionMul`/`powerMul`/`bounceMul`, 1 =
-  standard) and `botLevel` — parsed by `legOptions`/`legNum` with the room
+  standard), `teamSize` and `botLevel` — parsed by `legOptions`/`legNum` with the room
   defaults for anything missing. The result is written ONCE to the public `leg_result` table
   (`recordLegResult`: quick match from `finishMatch`, knockout from
   `crownChampion` via `tournamentPlacings`, keepers and fillers excluded);

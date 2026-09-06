@@ -2208,7 +2208,8 @@ function legBool(o: Record<string, unknown>, key: string, def: boolean): boolean
  * see join_lobby); two get a quick match; more get a single-elimination
  * knockout the host starts as usual. `venue` is "pitch:N"; `settings` is
  * the director's JSON: { gravityMul, frictionMul, powerMul, bounceMul }
- * (the custom-rules multipliers, 1 = standard) and botLevel (0..2).
+ * (the custom-rules multipliers, 1 = standard), teamSize (1..3 human
+ * seats a side, a solo leg is always 1) and botLevel (0..2).
  */
 export const create_championship_room = spacetimedb.reducer(
   { legId: t.u64(), code: t.string(), venue: t.string(), hostId: t.identity(), players: t.u8(), settings: t.string() },
@@ -2233,8 +2234,9 @@ export const create_championship_room = spacetimedb.reducer(
     };
     const solo = players <= 1;
     const botLevel = Math.round(legNum(o, 'botLevel', 1, 0, 2));
+    const teamSize = solo ? 1 : Math.round(legNum(o, 'teamSize', 1, 1, MAX_TEAM_SIZE));
     const mode = players > 2 ? MODE_TOURNAMENT : MODE_QUICK;
-    const lobby = insertLobby(ctx, mode, solo, pitch, 1, botLevel, phys, false, 1);
+    const lobby = insertLobby(ctx, mode, solo, pitch, 1, botLevel, phys, false, teamSize);
     ctx.db.lobby.id.update({ ...lobby, code: clean, hostId, championshipLeg: legId });
   }
 );
