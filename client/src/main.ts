@@ -763,6 +763,16 @@ function setSignInMode(mode: 'create' | 'signin') {
   siPassword.autocomplete = creating ? 'new-password' : 'current-password';
 }
 
+
+// A championship room entered as a guest: the result can never be matched
+// to a hub entrant (a guest is a different identity on every site), so say
+// so where the player is looking, with the sign-in one click away.
+function refreshLegGuestWarning(isLeg: boolean) {
+  const el = document.getElementById('leg-guest-warning');
+  if (el) el.classList.toggle('hidden', !(isLeg && accountKind() === 'guest'));
+}
+document.getElementById('leg-guest-signin')?.addEventListener('click', () => openSignInModal());
+
 function openSignInModal() {
   siMessage('');
   siPassword.value = '';
@@ -3765,6 +3775,7 @@ function updateWaitingOverlay(room: any, me: any) {
   // A championship leg: the room was opened by the hub, and its result goes
   // to the championship standings rather than staying in this room.
   const isLeg = (room.championshipLeg ?? 0n) !== 0n;
+  refreshLegGuestWarning(isLeg);
   $('waiting-title').textContent = isLeg
     ? 'CHAMPIONSHIP LEG'
     : isTournament
