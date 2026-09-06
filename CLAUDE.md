@@ -880,7 +880,7 @@ spacetime logs <module-name>
   token; the hub and every sibling game carry the same issuer string). One
   entrant = a solo match vs the bot (`vsBot` room; `join_lobby` starts it
   the moment the host walks in, like `create_practice`), two = quick
-  match, more = knockout; the championship host is the room host. The
+  match, more = knockout; the championship host is the room host (or, when that identity never turns up — a guest here, another account — whoever joins first takes the host seat: `claimChampionshipHost` in `join_lobby`). The
   reducer's `settings` arg is the director's JSON — the custom-rules
   multipliers (`gravityMul`/`frictionMul`/`powerMul`/`bounceMul`, 1 =
   standard), `teamSize` and `botLevel` — parsed by `legOptions`/`legNum` with the room

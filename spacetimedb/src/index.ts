@@ -2259,10 +2259,26 @@ export const set_tournament_settings = spacetimedb.reducer(
   }
 );
 
+
+// A championship room is opened by the relay with the championship host's
+// identity as room host — but that identity may never turn up here (a
+// guest in this game, a different account than on the hub). Nobody could
+// start the room then, so whoever walks in while the designated host is
+// absent takes the host seat. Called on every join; a no-op otherwise.
+function claimChampionshipHost(ctx: Ctx, lobby: LobbyRow): LobbyRow {
+  if (lobby.championshipLeg === 0n || lobby.status !== L_OPEN) return lobby;
+  if (sameId(lobby.hostId, ctx.sender)) return lobby;
+  for (const m of lobbyPlayers(ctx, lobby.id)) if (sameId(m.identity, lobby.hostId)) return lobby;
+  const claimed = { ...lobby, hostId: ctx.sender };
+  ctx.db.lobby.id.update(claimed);
+  return claimed;
+}
+
 export const join_lobby = spacetimedb.reducer({ code: t.string() }, (ctx, { code }) => {
   const player = getPlayer(ctx);
-  const lobby = ctx.db.lobby.code.find(code.trim().toUpperCase());
-  if (!lobby) throw new SenderError('Lobby not found');
+  const found = ctx.db.lobby.code.find(code.trim().toUpperCase());
+  if (!found) throw new SenderError('Lobby not found');
+  const lobby = claimChampionshipHost(ctx, found);
   const members = lobbyPlayers(ctx, lobby.id);
   if (members.some(m => sameId(m.identity, ctx.sender))) return;
   const competitors = members.filter(m => !m.spectator && m.role === ROLE_OUTFIELD && !m.isBot);
